@@ -1,3 +1,8 @@
+# -*- coding: utf-8 -*-
+"""
+Database models for Al-Hussiny Mobile Shop POS System
+"""
+
 from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, DateTime, Text, ForeignKey
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship, sessionmaker

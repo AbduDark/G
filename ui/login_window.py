@@ -1,273 +1,159 @@
-# -*- coding: utf-8 -*-
-"""
-Login window for Al-Hussiny Mobile Shop POS System
-"""
-
+import sys
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
-                            QLineEdit, QPushButton, QFrame, QSpacerItem, 
-                            QSizePolicy, QMessageBox)
+                            QLineEdit, QPushButton, QMessageBox, QFrame)
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QFont, QPixmap, QPalette
-import logging
+from PyQt6.QtGui import QFont, QPixmap
 
-from config import Config
-
-logger = logging.getLogger(__name__)
+from services.auth_service import AuthService
+from ui.main_window import MainWindow
+from ui.styles import get_stylesheet
 
 class LoginWindow(QWidget):
     """Login window for user authentication"""
     
-    # Signals
-    login_successful = pyqtSignal(dict)  # Emits user data
-    
-    def __init__(self, db_manager):
+    def __init__(self):
         super().__init__()
-        
-        self.db_manager = db_manager
-        self.logger = logging.getLogger(self.__class__.__name__)
-        
+        self.auth_service = AuthService()
+        self.main_window = None
         self.setup_ui()
-        self.setup_connections()
-        self.center_on_screen()
-        
+        self.apply_styles()
+    
     def setup_ui(self):
-        """Setup user interface"""
-        self.setWindowTitle("تسجيل الدخول - محل الحسيني")
+        """Setup the user interface"""
+        self.setWindowTitle("نظام إدارة محل الحسيني - تسجيل الدخول")
         self.setFixedSize(400, 500)
         self.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
         
-        # Main layout
-        main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(40, 40, 40, 40)
-        main_layout.setSpacing(20)
+        # Center the window
+        screen = self.screen().availableGeometry()
+        x = (screen.width() - self.width()) // 2
+        y = (screen.height() - self.height()) // 2
+        self.move(x, y)
         
-        # Spacer at top
-        main_layout.addItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
+        # Main layout
+        main_layout = QVBoxLayout()
+        main_layout.setSpacing(20)
+        main_layout.setContentsMargins(40, 40, 40, 40)
         
         # Logo/Title section
-        self.setup_header(main_layout)
+        title_layout = QVBoxLayout()
+        title_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
-        # Login form
-        self.setup_form(main_layout)
-        
-        # Login button
-        self.setup_buttons(main_layout)
-        
-        # Spacer at bottom
-        main_layout.addItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
-        
-        # Default credentials info
-        self.setup_info(main_layout)
-        
-    def setup_header(self, layout):
-        """Setup header with logo and title"""
-        # Shop name
-        title_label = QLabel(Config.SHOP_NAME)
-        title_font = QFont()
-        title_font.setPointSize(18)
-        title_font.setBold(True)
-        title_label.setFont(title_font)
+        # Title
+        title_label = QLabel("نظام إدارة محل الحسيني")
+        title_label.setObjectName("title-label")
         title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title_label.setStyleSheet("color: #2c3e50; margin-bottom: 10px;")
+        title_font = QFont("Noto Sans Arabic", 20, QFont.Weight.Bold)
+        title_label.setFont(title_font)
         
-        # Subtitle
-        subtitle_label = QLabel("نظام إدارة المبيعات والمخزون")
-        subtitle_font = QFont()
-        subtitle_font.setPointSize(12)
-        subtitle_label.setFont(subtitle_font)
+        subtitle_label = QLabel("نظام متكامل لإدارة المبيعات والمخزون")
         subtitle_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        subtitle_label.setStyleSheet("color: #7f8c8d; margin-bottom: 20px;")
+        subtitle_font = QFont("Noto Sans Arabic", 12)
+        subtitle_label.setFont(subtitle_font)
         
-        layout.addWidget(title_label)
-        layout.addWidget(subtitle_label)
-    
-    def setup_form(self, layout):
-        """Setup login form"""
-        # Form frame
+        title_layout.addWidget(title_label)
+        title_layout.addWidget(subtitle_label)
+        title_layout.addSpacing(20)
+        
+        # Login form frame
         form_frame = QFrame()
-        form_frame.setFrameStyle(QFrame.Shape.StyledPanel)
-        form_frame.setStyleSheet("""
-            QFrame {
-                background-color: #f8f9fa;
-                border: 1px solid #dee2e6;
-                border-radius: 10px;
-                padding: 20px;
-            }
-        """)
-        
+        form_frame.setFrameStyle(QFrame.Shape.Box)
         form_layout = QVBoxLayout(form_frame)
         form_layout.setSpacing(15)
+        form_layout.setContentsMargins(30, 30, 30, 30)
         
         # Email field
         email_label = QLabel("البريد الإلكتروني:")
-        email_label.setStyleSheet("font-weight: bold; color: #495057;")
+        email_label.setFont(QFont("Noto Sans Arabic", 11, QFont.Weight.Bold))
+        self.email_input = QLineEdit()
+        self.email_input.setPlaceholderText("ادخل البريد الإلكتروني")
+        self.email_input.setText("alhussiny@admin.com")  # Default for demo
         
-        self.email_edit = QLineEdit()
-        self.email_edit.setPlaceholderText("أدخل البريد الإلكتروني")
-        self.email_edit.setText(Config.DEFAULT_ADMIN_EMAIL)  # Pre-fill for convenience
-        self.email_edit.setStyleSheet("""
-            QLineEdit {
-                padding: 10px;
-                border: 2px solid #ced4da;
-                border-radius: 5px;
-                font-size: 11pt;
-                background-color: white;
-            }
-            QLineEdit:focus {
-                border-color: #007bff;
-            }
-        """)
-        
-        # Password field
+        # Password field  
         password_label = QLabel("كلمة المرور:")
-        password_label.setStyleSheet("font-weight: bold; color: #495057;")
+        password_label.setFont(QFont("Noto Sans Arabic", 11, QFont.Weight.Bold))
+        self.password_input = QLineEdit()
+        self.password_input.setPlaceholderText("ادخل كلمة المرور")
+        self.password_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.password_input.setText("admin@1234")  # Default for demo
         
-        self.password_edit = QLineEdit()
-        self.password_edit.setPlaceholderText("أدخل كلمة المرور")
-        self.password_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.password_edit.setText(Config.DEFAULT_ADMIN_PASSWORD)  # Pre-fill for convenience
-        self.password_edit.setStyleSheet("""
-            QLineEdit {
-                padding: 10px;
-                border: 2px solid #ced4da;
-                border-radius: 5px;
-                font-size: 11pt;
-                background-color: white;
-            }
-            QLineEdit:focus {
-                border-color: #007bff;
-            }
-        """)
-        
-        # Add to form layout
-        form_layout.addWidget(email_label)
-        form_layout.addWidget(self.email_edit)
-        form_layout.addWidget(password_label)
-        form_layout.addWidget(self.password_edit)
-        
-        layout.addWidget(form_frame)
-    
-    def setup_buttons(self, layout):
-        """Setup login button"""
+        # Login button
         self.login_button = QPushButton("تسجيل الدخول")
-        self.login_button.setStyleSheet("""
-            QPushButton {
-                background-color: #007bff;
-                color: white;
-                border: none;
-                padding: 12px 24px;
-                font-size: 12pt;
-                font-weight: bold;
-                border-radius: 6px;
-                min-height: 20px;
-            }
-            QPushButton:hover {
-                background-color: #0056b3;
-            }
-            QPushButton:pressed {
-                background-color: #004085;
-            }
-            QPushButton:disabled {
-                background-color: #6c757d;
-            }
-        """)
+        self.login_button.setFont(QFont("Noto Sans Arabic", 12, QFont.Weight.Bold))
+        self.login_button.clicked.connect(self.handle_login)
         
-        layout.addWidget(self.login_button)
+        # Error label
+        self.error_label = QLabel("")
+        self.error_label.setObjectName("error-label")
+        self.error_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.error_label.hide()
+        
+        # Add widgets to form layout
+        form_layout.addWidget(email_label)
+        form_layout.addWidget(self.email_input)
+        form_layout.addWidget(password_label)
+        form_layout.addWidget(self.password_input)
+        form_layout.addSpacing(10)
+        form_layout.addWidget(self.login_button)
+        form_layout.addWidget(self.error_label)
+        
+        # Add everything to main layout
+        main_layout.addLayout(title_layout)
+        main_layout.addWidget(form_frame)
+        main_layout.addStretch()
+        
+        self.setLayout(main_layout)
+        
+        # Connect Enter key to login
+        self.password_input.returnPressed.connect(self.handle_login)
+        self.email_input.returnPressed.connect(self.handle_login)
     
-    def setup_info(self, layout):
-        """Setup default credentials info"""
-        info_frame = QFrame()
-        info_frame.setStyleSheet("""
-            QFrame {
-                background-color: #e9ecef;
-                border: 1px solid #ced4da;
-                border-radius: 5px;
-                padding: 10px;
-            }
-        """)
-        
-        info_layout = QVBoxLayout(info_frame)
-        
-        info_title = QLabel("بيانات المدير الافتراضي:")
-        info_title.setStyleSheet("font-weight: bold; font-size: 10pt;")
-        
-        info_email = QLabel(f"البريد: {Config.DEFAULT_ADMIN_EMAIL}")
-        info_password = QLabel(f"كلمة المرور: {Config.DEFAULT_ADMIN_PASSWORD}")
-        
-        info_layout.addWidget(info_title)
-        info_layout.addWidget(info_email)
-        info_layout.addWidget(info_password)
-        
-        layout.addWidget(info_frame)
+    def apply_styles(self):
+        """Apply custom styles"""
+        self.setStyleSheet(get_stylesheet("light"))
     
-    def setup_connections(self):
-        """Setup signal connections"""
-        self.login_button.clicked.connect(self.login)
-        self.email_edit.returnPressed.connect(self.login)
-        self.password_edit.returnPressed.connect(self.login)
-    
-    def login(self):
-        """Handle login attempt"""
-        email = self.email_edit.text().strip()
-        password = self.password_edit.text()
+    def handle_login(self):
+        """Handle login button click"""
+        email = self.email_input.text().strip()
+        password = self.password_input.text()
         
-        # Validate input
-        if not email:
-            QMessageBox.warning(self, "خطأ", "يرجى إدخال البريد الإلكتروني")
-            self.email_edit.setFocus()
+        if not email or not password:
+            self.show_error("يرجى إدخال البريد الإلكتروني وكلمة المرور")
             return
-        
-        if not password:
-            QMessageBox.warning(self, "خطأ", "يرجى إدخال كلمة المرور")
-            self.password_edit.setFocus()
-            return
-        
-        # Disable login button during authentication
-        self.login_button.setEnabled(False)
-        self.login_button.setText("جاري التحقق...")
         
         try:
-            # Authenticate user
-            user_data = self.db_manager.authenticate_user(email, password)
-            
-            if user_data:
-                # Successful login
-                self.logger.info(f"تسجيل دخول ناجح: {email}")
-                self.login_successful.emit(user_data)
-            else:
-                # Failed login
-                self.logger.warning(f"فشل تسجيل الدخول: {email}")
-                QMessageBox.critical(
-                    self, 
-                    "فشل تسجيل الدخول", 
-                    "البريد الإلكتروني أو كلمة المرور غير صحيحة"
-                )
-                self.password_edit.clear()
-                self.password_edit.setFocus()
+            user = self.auth_service.authenticate(email, password)
+            if user:
+                # Login successful
+                self.hide()
+                self.main_window = MainWindow(user)
+                self.main_window.show()
                 
-        except Exception as e:
-            self.logger.error(f"خطأ في تسجيل الدخول: {e}")
-            QMessageBox.critical(
-                self, 
-                "خطأ", 
-                f"حدث خطأ أثناء تسجيل الدخول:\n{str(e)}"
-            )
+                # Connect to main window closed signal
+                self.main_window.closed.connect(self.show)
+            else:
+                self.show_error("البريد الإلكتروني أو كلمة المرور غير صحيحة")
         
-        finally:
-            # Re-enable login button
-            self.login_button.setEnabled(True)
-            self.login_button.setText("تسجيل الدخول")
+        except Exception as e:
+            self.show_error(f"خطأ في تسجيل الدخول: {str(e)}")
     
-    def center_on_screen(self):
-        """Center window on screen"""
-        from PyQt6.QtGui import QGuiApplication
-        screen = QGuiApplication.primaryScreen().geometry()
-        window = self.frameGeometry()
-        window.moveCenter(screen.center())
-        self.move(window.topLeft())
+    def show_error(self, message):
+        """Show error message"""
+        self.error_label.setText(message)
+        self.error_label.show()
     
-    def keyPressEvent(self, event):
-        """Handle key press events"""
-        if event.key() == Qt.Key.Key_Escape:
-            self.close()
-        super().keyPressEvent(event)
+    def closeEvent(self, event):
+        """Handle window close event"""
+        reply = QMessageBox.question(
+            self, 
+            'تأكيد الخروج',
+            'هل أنت متأكد من الخروج من النظام؟',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            event.accept()
+            sys.exit()
+        else:
+            event.ignore()

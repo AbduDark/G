@@ -9,7 +9,6 @@ from .sales_service import SalesService
 from .repair_service import RepairService
 from .report_service import ReportService
 from .backup_service import BackupService
-from .print_service import PrintService
 
 __all__ = [
     'AuthService',
@@ -17,6 +16,5 @@ __all__ = [
     'SalesService',
     'RepairService',
     'ReportService',
-    'BackupService',
-    'PrintService'
+    'BackupService'
 ]

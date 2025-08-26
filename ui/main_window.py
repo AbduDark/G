@@ -1,559 +1,359 @@
-# -*- coding: utf-8 -*-
-"""
-Main window for Al-Hussiny Mobile Shop POS System
-"""
-
-from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-                            QPushButton, QLabel, QFrame, QSplitter, QScrollArea,
-                            QMenuBar, QMenu, QToolBar, QStatusBar)
+from PyQt6.QtWidgets import (QMainWindow, QVBoxLayout, QHBoxLayout, QWidget, 
+                            QLabel, QPushButton, QMenuBar, QStatusBar, QGridLayout,
+                            QFrame, QLineEdit, QMessageBox)
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
-from PyQt6.QtGui import QAction, QIcon, QFont
-import logging
+from PyQt6.QtGui import QFont, QAction
 
-from .base_window import BaseWindow
-from .dashboard_window import DashboardWindow
-from .inventory_window import InventoryWindow
-from .sales_window import SalesWindow
-from .repairs_window import RepairsWindow
-from .reports_window import ReportsWindow
-from .users_window import UsersWindow
-from .widgets.search_widget import GlobalSearchWidget
-from config import Config
+from ui.inventory_window import InventoryWindow
+from ui.sales_window import SalesWindow
+from ui.repair_window import RepairWindow
+from ui.transfer_window import TransferWindow
+from ui.reports_window import ReportsWindow
+from ui.user_management_window import UserManagementWindow
+from ui.settings_window import SettingsWindow
+from ui.backup_window import BackupWindow
+from ui.styles import get_stylesheet
+from utils.search_service import SearchService
+from services.report_service import ReportService
 
-logger = logging.getLogger(__name__)
-
-class MainWindow(BaseWindow):
-    """Main application window with navigation and module access"""
+class MainWindow(QMainWindow):
+    """Main application window with dashboard"""
     
-    # Signals
-    logout_requested = pyqtSignal()
+    closed = pyqtSignal()
     
-    def __init__(self, db_manager, user_data):
-        super().__init__(db_manager, user_data)
+    def __init__(self, user):
+        super().__init__()
+        self.current_user = user
+        self.search_service = SearchService()
+        self.report_service = ReportService()
+        self.child_windows = []
         
-        self.child_windows = {}
-        self.setup_main_window()
+        self.setup_ui()
         self.setup_menu_bar()
-        self.setup_toolbar()
-        self.refresh_data()
+        self.setup_status_bar()
+        self.apply_styles()
+        self.load_dashboard_data()
         
-        # Auto-refresh timer
+        # Setup timer for auto-refresh
         self.refresh_timer = QTimer()
-        self.refresh_timer.timeout.connect(self.refresh_data)
-        self.refresh_timer.start(30000)  # Refresh every 30 seconds
-        
-    def setup_main_window(self):
-        """Setup main window properties"""
-        self.set_title("محل الحسيني - نظام إدارة المبيعات والمخزون")
-        self.setMinimumSize(*Config.MAIN_WINDOW_MIN_SIZE)
-        self.center_on_screen()
-        
-        # Setup main content
-        self.setup_main_content()
-        
-    def setup_main_content(self):
-        """Setup main content area"""
-        # Main content widget
-        content_widget = QWidget()
-        content_layout = QVBoxLayout(content_widget)
-        content_layout.setContentsMargins(20, 20, 20, 20)
-        content_layout.setSpacing(20)
-        
-        # Welcome section
-        self.setup_welcome_section(content_layout)
-        
-        # Quick actions grid
-        self.setup_quick_actions(content_layout)
-        
-        # Statistics section
-        self.setup_statistics(content_layout)
-        
-        # Make content scrollable
-        scroll_area = QScrollArea()
-        scroll_area.setWidget(content_widget)
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        
-        # Set central widget
-        self.setCentralWidget(scroll_area)
+        self.refresh_timer.timeout.connect(self.load_dashboard_data)
+        self.refresh_timer.start(300000)  # Refresh every 5 minutes
     
-    def setup_welcome_section(self, layout):
-        """Setup welcome section"""
-        welcome_frame = QFrame()
-        welcome_frame.setFrameStyle(QFrame.Shape.StyledPanel)
-        welcome_frame.setStyleSheet("""
-            QFrame {
-                background: qlineargradient(x1: 0, y1: 0, x2: 1, y2: 1,
-                    stop: 0 #4e73df, stop: 1 #224abe);
-                border-radius: 10px;
-                color: white;
-                padding: 20px;
-            }
-        """)
+    def setup_ui(self):
+        """Setup the user interface"""
+        self.setWindowTitle(f"نظام إدارة محل الحسيني - {self.current_user.name}")
+        self.setMinimumSize(1200, 800)
+        self.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
         
-        welcome_layout = QVBoxLayout(welcome_frame)
+        # Center widget
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
         
-        # Welcome message
-        welcome_label = QLabel(f"مرحباً {self.user_data['name']}")
-        welcome_font = QFont()
-        welcome_font.setPointSize(16)
-        welcome_font.setBold(True)
-        welcome_label.setFont(welcome_font)
-        welcome_label.setStyleSheet("color: white;")
+        # Main layout
+        main_layout = QVBoxLayout()
+        main_layout.setSpacing(20)
+        main_layout.setContentsMargins(20, 20, 20, 20)
         
-        # Date and time
-        from datetime import datetime
-        current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
-        time_label = QLabel(f"التاريخ والوقت: {current_time}")
-        time_label.setStyleSheet("color: #e3e6f0; font-size: 12pt;")
+        # Header section with search
+        header_layout = QHBoxLayout()
         
-        welcome_layout.addWidget(welcome_label)
-        welcome_layout.addWidget(time_label)
+        # Welcome label
+        welcome_label = QLabel(f"مرحباً، {self.current_user.name}")
+        welcome_label.setFont(QFont("Noto Sans Arabic", 16, QFont.Weight.Bold))
+        welcome_label.setObjectName("title-label")
         
-        layout.addWidget(welcome_frame)
+        # Search box
+        search_layout = QHBoxLayout()
+        search_label = QLabel("البحث السريع:")
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("ابحث في المنتجات، الفواتير، العملاء...")
+        self.search_input.textChanged.connect(self.perform_search)
+        self.search_input.setMaximumWidth(300)
+        
+        search_layout.addWidget(search_label)
+        search_layout.addWidget(self.search_input)
+        
+        header_layout.addWidget(welcome_label)
+        header_layout.addStretch()
+        header_layout.addLayout(search_layout)
+        
+        # Dashboard cards
+        dashboard_layout = QGridLayout()
+        self.create_dashboard_cards(dashboard_layout)
+        
+        # Main menu buttons
+        menu_layout = QGridLayout()
+        self.create_menu_buttons(menu_layout)
+        
+        # Add layouts to main layout
+        main_layout.addLayout(header_layout)
+        main_layout.addLayout(dashboard_layout)
+        main_layout.addSpacing(20)
+        main_layout.addLayout(menu_layout)
+        main_layout.addStretch()
+        
+        central_widget.setLayout(main_layout)
     
-    def setup_quick_actions(self, layout):
-        """Setup quick actions grid"""
-        actions_frame = QFrame()
-        actions_frame.setFrameStyle(QFrame.Shape.StyledPanel)
-        actions_frame.setStyleSheet("""
-            QFrame {
-                background-color: #f8f9fc;
-                border: 1px solid #e3e6f0;
-                border-radius: 10px;
-                padding: 20px;
-            }
-        """)
+    def create_dashboard_cards(self, layout):
+        """Create dashboard summary cards"""
+        # Today's sales card
+        self.sales_card = self.create_info_card("مبيعات اليوم", "0.00 جنيه", "#5E81AC")
         
-        actions_layout = QVBoxLayout(actions_frame)
+        # Low stock card
+        self.stock_card = self.create_info_card("منتجات منخفضة المخزون", "0", "#EBCB8B")
         
-        # Title
-        title_label = QLabel("الوظائف الرئيسية")
-        title_font = QFont()
-        title_font.setPointSize(14)
-        title_font.setBold(True)
-        title_label.setFont(title_font)
-        title_label.setStyleSheet("color: #5a5c69; margin-bottom: 15px;")
+        # Pending repairs card
+        self.repairs_card = self.create_info_card("أجهزة قيد الصيانة", "0", "#BF616A")
         
-        actions_layout.addWidget(title_label)
+        # Total products card
+        self.products_card = self.create_info_card("إجمالي المنتجات", "0", "#A3BE8C")
         
-        # Actions grid
-        grid_layout = QGridLayout()
-        grid_layout.setSpacing(15)
-        
-        # Define actions with permissions
-        actions = [
-            ("لوحة التحكم", "dashboard", "all", self.open_dashboard),
-            ("المبيعات", "sales", "sales", self.open_sales),
-            ("المخزون", "inventory", "inventory", self.open_inventory),
-            ("الصيانة", "repairs", "repairs", self.open_repairs),
-            ("التقارير", "reports", "reports", self.open_reports),
-            ("إدارة المستخدمين", "users", "users", self.open_users),
-        ]
-        
-        row, col = 0, 0
-        for name, icon, permission, callback in actions:
-            if self.has_permission(permission):
-                button = self.create_action_button(name, callback)
-                grid_layout.addWidget(button, row, col)
-                
-                col += 1
-                if col >= 3:  # 3 columns
-                    col = 0
-                    row += 1
-        
-        actions_layout.addLayout(grid_layout)
-        layout.addWidget(actions_frame)
+        layout.addWidget(self.sales_card, 0, 0)
+        layout.addWidget(self.stock_card, 0, 1)
+        layout.addWidget(self.repairs_card, 0, 2)
+        layout.addWidget(self.products_card, 0, 3)
     
-    def create_action_button(self, text, callback):
-        """Create styled action button"""
-        button = QPushButton(text)
-        button.setMinimumSize(200, 80)
-        button.setStyleSheet("""
-            QPushButton {
-                background-color: #4e73df;
-                color: white;
-                border: none;
-                border-radius: 8px;
-                font-size: 12pt;
-                font-weight: bold;
-                padding: 10px;
-            }
-            QPushButton:hover {
-                background-color: #2e59d9;
-            }
-            QPushButton:pressed {
-                background-color: #1e3a8a;
-            }
-        """)
-        button.clicked.connect(callback)
-        return button
-    
-    def setup_statistics(self, layout):
-        """Setup statistics section"""
-        stats_frame = QFrame()
-        stats_frame.setFrameStyle(QFrame.Shape.StyledPanel)
-        stats_frame.setStyleSheet("""
-            QFrame {
-                background-color: #f8f9fc;
-                border: 1px solid #e3e6f0;
-                border-radius: 10px;
-                padding: 20px;
-            }
-        """)
-        
-        stats_layout = QVBoxLayout(stats_frame)
-        
-        # Title
-        title_label = QLabel("إحصائيات سريعة")
-        title_font = QFont()
-        title_font.setPointSize(14)
-        title_font.setBold(True)
-        title_label.setFont(title_font)
-        title_label.setStyleSheet("color: #5a5c69; margin-bottom: 15px;")
-        
-        stats_layout.addWidget(title_label)
-        
-        # Stats grid
-        self.stats_grid = QGridLayout()
-        self.stats_grid.setSpacing(10)
-        
-        # Initialize stats widgets
-        self.stats_widgets = {}
-        self.create_stat_widget("مبيعات اليوم", "0", "#1cc88a", 0, 0)
-        self.create_stat_widget("المنتجات", "0", "#36b9cc", 0, 1)
-        self.create_stat_widget("الصيانات المعلقة", "0", "#f6c23e", 1, 0)
-        self.create_stat_widget("المنتجات المنخفضة", "0", "#e74a3b", 1, 1)
-        
-        stats_layout.addLayout(self.stats_grid)
-        layout.addWidget(stats_frame)
-    
-    def create_stat_widget(self, title, value, color, row, col):
-        """Create statistics widget"""
-        stat_frame = QFrame()
-        stat_frame.setStyleSheet(f"""
+    def create_info_card(self, title, value, color):
+        """Create an information card widget"""
+        card = QFrame()
+        card.setFrameStyle(QFrame.Shape.Box)
+        card.setStyleSheet(f"""
             QFrame {{
-                background-color: {color};
+                background-color: white;
+                border: 1px solid #E0E0E0;
                 border-radius: 8px;
-                padding: 15px;
-                min-height: 80px;
+                border-left: 4px solid {color};
             }}
         """)
+        card.setMinimumHeight(100)
         
-        stat_layout = QVBoxLayout(stat_frame)
-        
-        value_label = QLabel(value)
-        value_font = QFont()
-        value_font.setPointSize(18)
-        value_font.setBold(True)
-        value_label.setFont(value_font)
-        value_label.setStyleSheet("color: white;")
-        value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout = QVBoxLayout()
+        layout.setContentsMargins(15, 15, 15, 15)
         
         title_label = QLabel(title)
-        title_label.setStyleSheet("color: white; font-size: 11pt;")
-        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title_label.setFont(QFont("Noto Sans Arabic", 11, QFont.Weight.Bold))
         
-        stat_layout.addWidget(value_label)
-        stat_layout.addWidget(title_label)
+        value_label = QLabel(value)
+        value_label.setFont(QFont("Noto Sans Arabic", 18, QFont.Weight.Bold))
+        value_label.setStyleSheet(f"color: {color};")
         
-        self.stats_widgets[title] = value_label
-        self.stats_grid.addWidget(stat_frame, row, col)
+        layout.addWidget(title_label)
+        layout.addWidget(value_label)
+        card.setLayout(layout)
+        
+        return card
+    
+    def create_menu_buttons(self, layout):
+        """Create main menu buttons"""
+        buttons = [
+            ("إدارة المخزون", self.open_inventory_window, "inventory"),
+            ("المبيعات والفواتير", self.open_sales_window, "sales"),
+            ("خدمة الصيانة", self.open_repair_window, "repairs"),
+            ("تحويلات الرصيد", self.open_transfer_window, "transfers"),
+            ("التقارير", self.open_reports_window, "reports"),
+            ("إدارة المستخدمين", self.open_user_management_window, "users"),
+            ("الإعدادات", self.open_settings_window, "settings"),
+            ("النسخ الاحتياطي", self.open_backup_window, "backup")
+        ]
+        
+        row = 0
+        col = 0
+        for text, handler, permission in buttons:
+            if self.has_permission(permission):
+                button = QPushButton(text)
+                button.setFont(QFont("Noto Sans Arabic", 12, QFont.Weight.Bold))
+                button.setMinimumSize(200, 80)
+                button.clicked.connect(handler)
+                
+                layout.addWidget(button, row, col)
+                
+                col += 1
+                if col > 3:
+                    col = 0
+                    row += 1
     
     def setup_menu_bar(self):
-        """Setup application menu bar"""
+        """Setup the menu bar"""
         menubar = self.menuBar()
         
         # File menu
-        file_menu = menubar.addMenu("ملف")
+        file_menu = menubar.addMenu('ملف')
         
-        # Backup submenu
-        backup_menu = file_menu.addMenu("النسخ الاحتياطي")
-        
-        backup_action = QAction("إنشاء نسخة احتياطية", self)
-        backup_action.triggered.connect(self.create_backup)
-        backup_menu.addAction(backup_action)
-        
-        restore_action = QAction("استعادة نسخة احتياطية", self)
-        restore_action.triggered.connect(self.restore_backup)
-        backup_menu.addAction(restore_action)
-        
-        file_menu.addSeparator()
-        
-        # Logout action
-        logout_action = QAction("تسجيل الخروج", self)
+        logout_action = QAction('تسجيل الخروج', self)
         logout_action.triggered.connect(self.logout)
         file_menu.addAction(logout_action)
         
-        # Exit action
-        exit_action = QAction("خروج", self)
+        exit_action = QAction('خروج', self)
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
         
         # Tools menu
-        tools_menu = menubar.addMenu("أدوات")
+        tools_menu = menubar.addMenu('أدوات')
         
-        settings_action = QAction("الإعدادات", self)
-        settings_action.triggered.connect(self.open_settings)
+        backup_action = QAction('نسخ احتياطي', self)
+        backup_action.triggered.connect(self.open_backup_window)
+        tools_menu.addAction(backup_action)
+        
+        settings_action = QAction('الإعدادات', self)
+        settings_action.triggered.connect(self.open_settings_window)
         tools_menu.addAction(settings_action)
-        
-        # Help menu
-        help_menu = menubar.addMenu("مساعدة")
-        
-        about_action = QAction("حول البرنامج", self)
-        about_action.triggered.connect(self.show_about)
-        help_menu.addAction(about_action)
     
-    def setup_toolbar(self):
-        """Setup application toolbar"""
-        toolbar = QToolBar()
-        toolbar.setMovable(False)
-        self.addToolBar(toolbar)
-        
-        # Global search widget
-        self.search_widget = GlobalSearchWidget(self.db_manager)
-        self.search_widget.result_selected.connect(self.handle_search_result)
-        toolbar.addWidget(self.search_widget)
-        
-        toolbar.addSeparator()
-        
-        # Quick action buttons
-        if self.has_permission("sales"):
-            new_sale_action = QAction("مبيعة جديدة", self)
-            new_sale_action.triggered.connect(self.new_sale)
-            toolbar.addAction(new_sale_action)
-        
-        if self.has_permission("inventory"):
-            new_product_action = QAction("منتج جديد", self)
-            new_product_action.triggered.connect(self.new_product)
-            toolbar.addAction(new_product_action)
-        
-        toolbar.addSeparator()
-        
-        # Refresh action
-        refresh_action = QAction("تحديث", self)
-        refresh_action.triggered.connect(self.refresh_data)
-        toolbar.addAction(refresh_action)
+    def setup_status_bar(self):
+        """Setup the status bar"""
+        status_bar = self.statusBar()
+        status_bar.showMessage(f"متصل كـ: {self.current_user.name} | الصلاحية: {self.current_user.role.name}")
     
-    def refresh_data(self):
-        """Refresh dashboard statistics"""
+    def apply_styles(self):
+        """Apply custom styles"""
+        self.setStyleSheet(get_stylesheet("light"))
+    
+    def has_permission(self, permission):
+        """Check if current user has a specific permission"""
+        # Admin has all permissions
+        if self.current_user.role.name == "Admin":
+            return True
+        
+        # Parse permissions JSON and check
+        import json
         try:
-            session = self.db_manager.get_session()
+            permissions = json.loads(self.current_user.role.permissions_json)
+            return permissions.get(permission, False) or permissions.get("all", False)
+        except:
+            return False
+    
+    def load_dashboard_data(self):
+        """Load dashboard summary data"""
+        try:
+            # Get today's sales total
+            today_sales = self.report_service.get_today_sales_total()
+            self.sales_card.layout().itemAt(1).widget().setText(f"{today_sales:.2f} جنيه")
             
-            # Get today's sales
-            from datetime import datetime, timedelta
-            from models import Sale, Product, Repair
+            # Get low stock count
+            low_stock_count = self.report_service.get_low_stock_count()
+            self.stock_card.layout().itemAt(1).widget().setText(str(low_stock_count))
             
-            today = datetime.now().date()
-            today_start = datetime.combine(today, datetime.min.time())
-            today_end = datetime.combine(today, datetime.max.time())
+            # Get pending repairs count
+            pending_repairs = self.report_service.get_pending_repairs_count()
+            self.repairs_card.layout().itemAt(1).widget().setText(str(pending_repairs))
             
-            today_sales = session.query(Sale).filter(
-                Sale.created_at >= today_start,
-                Sale.created_at <= today_end
-            ).count()
-            
-            # Get product count
-            product_count = session.query(Product).filter_by(active=True).count()
-            
-            # Get pending repairs
-            pending_repairs = session.query(Repair).filter(
-                ~Repair.status.in_(['تم التسليم', 'غير قابل للإصلاح'])
-            ).count()
-            
-            # Get low stock products
-            low_stock_count = session.query(Product).filter(
-                Product.quantity <= Product.min_quantity,
-                Product.active == True
-            ).count()
-            
-            # Update statistics widgets
-            if "مبيعات اليوم" in self.stats_widgets:
-                self.stats_widgets["مبيعات اليوم"].setText(str(today_sales))
-            
-            if "المنتجات" in self.stats_widgets:
-                self.stats_widgets["المنتجات"].setText(str(product_count))
-            
-            if "الصيانات المعلقة" in self.stats_widgets:
-                self.stats_widgets["الصيانات المعلقة"].setText(str(pending_repairs))
-            
-            if "المنتجات المنخفضة" in self.stats_widgets:
-                self.stats_widgets["المنتجات المنخفضة"].setText(str(low_stock_count))
-            
-            self.update_status("تم تحديث البيانات")
+            # Get total products count
+            total_products = self.report_service.get_total_products_count()
+            self.products_card.layout().itemAt(1).widget().setText(str(total_products))
             
         except Exception as e:
-            self.logger.error(f"خطأ في تحديث البيانات: {e}")
-        finally:
-            if 'session' in locals():
-                session.close()
+            print(f"Error loading dashboard data: {e}")
     
-    # Window opening methods
-    def open_dashboard(self):
-        """Open dashboard window"""
-        self.open_child_window("dashboard", DashboardWindow)
+    def perform_search(self):
+        """Perform global search"""
+        query = self.search_input.text().strip()
+        if len(query) >= 2:
+            try:
+                results = self.search_service.global_search(query)
+                # You could show search results in a popup or separate window
+                print(f"Search results for '{query}': {len(results)} items found")
+            except Exception as e:
+                print(f"Search error: {e}")
     
-    def open_sales(self):
+    def open_inventory_window(self):
+        """Open inventory management window"""
+        if not self.has_permission("inventory"):
+            QMessageBox.warning(self, "تحذير", "ليس لديك صلاحية للوصول إلى إدارة المخزون")
+            return
+        
+        window = InventoryWindow(self.current_user)
+        window.show()
+        self.child_windows.append(window)
+    
+    def open_sales_window(self):
         """Open sales window"""
-        self.open_child_window("sales", SalesWindow)
+        if not self.has_permission("sales"):
+            QMessageBox.warning(self, "تحذير", "ليس لديك صلاحية للوصول إلى المبيعات")
+            return
+        
+        window = SalesWindow(self.current_user)
+        window.show()
+        self.child_windows.append(window)
     
-    def open_inventory(self):
-        """Open inventory window"""
-        self.open_child_window("inventory", InventoryWindow)
+    def open_repair_window(self):
+        """Open repair service window"""
+        if not self.has_permission("repairs"):
+            QMessageBox.warning(self, "تحذير", "ليس لديك صلاحية للوصول إلى خدمة الصيانة")
+            return
+        
+        window = RepairWindow(self.current_user)
+        window.show()
+        self.child_windows.append(window)
     
-    def open_repairs(self):
-        """Open repairs window"""
-        self.open_child_window("repairs", RepairsWindow)
+    def open_transfer_window(self):
+        """Open balance transfer window"""
+        if not self.has_permission("transfers"):
+            QMessageBox.warning(self, "تحذير", "ليس لديك صلاحية للوصول إلى تحويلات الرصيد")
+            return
+        
+        window = TransferWindow(self.current_user)
+        window.show()
+        self.child_windows.append(window)
     
-    def open_reports(self):
+    def open_reports_window(self):
         """Open reports window"""
-        self.open_child_window("reports", ReportsWindow)
-    
-    def open_users(self):
-        """Open users window"""
-        if self.require_permission("users", "إدارة المستخدمين"):
-            self.open_child_window("users", UsersWindow)
-    
-    def open_child_window(self, window_key, window_class):
-        """Open or focus child window"""
-        try:
-            if window_key in self.child_windows:
-                # Window already exists, bring to front
-                window = self.child_windows[window_key]
-                window.show()
-                window.raise_()
-                window.activateWindow()
-            else:
-                # Create new window
-                window = window_class(self.db_manager, self.user_data)
-                window.window_closing.connect(lambda: self.child_windows.pop(window_key, None))
-                self.child_windows[window_key] = window
-                window.show()
-                
-        except Exception as e:
-            self.logger.error(f"خطأ في فتح النافذة {window_key}: {e}")
-            self.show_message(f"خطأ في فتح النافذة: {str(e)}", "error")
-    
-    def new_sale(self):
-        """Create new sale"""
-        if self.require_permission("sales", "إنشاء مبيعة جديدة"):
-            self.open_sales()
-            # TODO: Signal to sales window to create new sale
-    
-    def new_product(self):
-        """Create new product"""
-        if self.require_permission("inventory", "إضافة منتج جديد"):
-            self.open_inventory()
-            # TODO: Signal to inventory window to create new product
-    
-    def handle_search_result(self, result):
-        """Handle global search result selection"""
-        try:
-            result_type = result.get("type")
-            
-            if result_type == "منتج":
-                self.open_inventory()
-                # TODO: Signal to inventory window to show product
-            elif result_type == "فاتورة":
-                self.open_sales()
-                # TODO: Signal to sales window to show sale
-            elif result_type == "صيانة":
-                self.open_repairs()
-                # TODO: Signal to repairs window to show repair
-                
-        except Exception as e:
-            self.logger.error(f"خطأ في معالجة نتيجة البحث: {e}")
-    
-    def create_backup(self):
-        """Create database backup"""
-        try:
-            backup_path = self.db_manager.backup_database()
-            if backup_path:
-                self.show_message(f"تم إنشاء النسخة الاحتياطية بنجاح:\n{backup_path}", "success")
-                self.log_action("create_backup", f"نسخة احتياطية: {backup_path}")
-            else:
-                self.show_message("فشل في إنشاء النسخة الاحتياطية", "error")
-                
-        except Exception as e:
-            self.logger.error(f"خطأ في إنشاء النسخة الاحتياطية: {e}")
-            self.show_message(f"خطأ في إنشاء النسخة الاحتياطية:\n{str(e)}", "error")
-    
-    def restore_backup(self):
-        """Restore database from backup"""
-        from PyQt6.QtWidgets import QFileDialog
+        if not self.has_permission("reports"):
+            QMessageBox.warning(self, "تحذير", "ليس لديك صلاحية للوصول إلى التقارير")
+            return
         
-        try:
-            file_path, _ = QFileDialog.getOpenFileName(
-                self,
-                "اختر ملف النسخة الاحتياطية",
-                str(Config.DB_BACKUP_DIR),
-                "Database Files (*.db);;All Files (*)"
-            )
-            
-            if file_path:
-                if self.show_question(
-                    "هل أنت متأكد من استعادة النسخة الاحتياطية؟\n"
-                    "سيتم استبدال قاعدة البيانات الحالية."
-                ):
-                    if self.db_manager.restore_database(file_path):
-                        self.show_message("تم استعادة النسخة الاحتياطية بنجاح", "success")
-                        self.log_action("restore_backup", f"استعادة من: {file_path}")
-                        self.refresh_data()
-                    else:
-                        self.show_message("فشل في استعادة النسخة الاحتياطية", "error")
-                        
-        except Exception as e:
-            self.logger.error(f"خطأ في استعادة النسخة الاحتياطية: {e}")
-            self.show_message(f"خطأ في استعادة النسخة الاحتياطية:\n{str(e)}", "error")
+        window = ReportsWindow(self.current_user)
+        window.show()
+        self.child_windows.append(window)
     
-    def open_settings(self):
-        """Open settings dialog"""
-        # TODO: Implement settings dialog
-        self.show_message("إعدادات التطبيق ستكون متاحة قريباً", "info")
+    def open_user_management_window(self):
+        """Open user management window"""
+        if not self.has_permission("users"):
+            QMessageBox.warning(self, "تحذير", "ليس لديك صلاحية لإدارة المستخدمين")
+            return
+        
+        window = UserManagementWindow(self.current_user)
+        window.show()
+        self.child_windows.append(window)
     
-    def show_about(self):
-        """Show about dialog"""
-        from PyQt6.QtWidgets import QMessageBox
+    def open_settings_window(self):
+        """Open settings window"""
+        window = SettingsWindow(self.current_user)
+        window.show()
+        self.child_windows.append(window)
+    
+    def open_backup_window(self):
+        """Open backup window"""
+        if not self.has_permission("backup"):
+            QMessageBox.warning(self, "تحذير", "ليس لديك صلاحية للنسخ الاحتياطي")
+            return
         
-        about_text = f"""
-        {Config.APP_NAME}
-        الإصدار: {Config.APP_VERSION}
-        
-        نظام إدارة المبيعات والمخزون لمحلات الهواتف المحمولة
-        
-        تم التطوير بواسطة: {Config.APP_AUTHOR}
-        """
-        
-        QMessageBox.about(self, "حول البرنامج", about_text)
+        window = BackupWindow(self.current_user)
+        window.show()
+        self.child_windows.append(window)
     
     def logout(self):
         """Handle user logout"""
-        if self.show_question("هل تريد تسجيل الخروج؟"):
-            self.log_action("logout", "تسجيل خروج المستخدم")
-            
+        reply = QMessageBox.question(
+            self,
+            'تأكيد تسجيل الخروج',
+            'هل أنت متأكد من تسجيل الخروج؟',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        
+        if reply == QMessageBox.StandardButton.Yes:
             # Close all child windows
-            for window in list(self.child_windows.values()):
-                window.close()
-            self.child_windows.clear()
+            for window in self.child_windows:
+                if window and not window.isHidden():
+                    window.close()
             
-            # Stop refresh timer
-            if hasattr(self, 'refresh_timer'):
-                self.refresh_timer.stop()
-            
-            self.logout_requested.emit()
+            self.close()
     
     def closeEvent(self, event):
         """Handle window close event"""
-        if self.show_question("هل تريد إغلاق البرنامج؟"):
-            # Close all child windows
-            for window in list(self.child_windows.values()):
+        # Close all child windows
+        for window in self.child_windows:
+            if window and not window.isHidden():
                 window.close()
-            
-            # Stop refresh timer
-            if hasattr(self, 'refresh_timer'):
-                self.refresh_timer.stop()
-            
-            event.accept()
-        else:
-            event.ignore()
+        
+        self.closed.emit()
+        event.accept()

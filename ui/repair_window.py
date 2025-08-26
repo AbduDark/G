@@ -1,473 +1,193 @@
-# -*- coding: utf-8 -*-
-"""
-Repair service management window
-"""
+from PyQt6.QtWidgets import (QMainWindow, QVBoxLayout, QHBoxLayout, QWidget, 
+                            QLabel, QPushButton, QTableWidget, QTableWidgetItem,
+                            QLineEdit, QComboBox, QDoubleSpinBox, QTextEdit,
+                            QFormLayout, QDialog, QMessageBox, QGroupBox,
+                            QHeaderView, QAbstractItemView, QDateEdit)
+from PyQt6.QtCore import Qt, QDate
+from PyQt6.QtGui import QFont
+from datetime import datetime
 
-import logging
-from datetime import datetime, timedelta
-from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-                            QTableWidget, QTableWidgetItem, QPushButton, QLabel,
-                            QLineEdit, QComboBox, QTextEdit, QDateEdit, QDoubleSpinBox,
-                            QMessageBox, QHeaderView, QFrame, QGroupBox, QFormLayout,
-                            QTabWidget, QSpinBox, QCheckBox, QSplitter, QScrollArea)
-from PyQt6.QtCore import Qt, QDate, pyqtSignal
-from PyQt6.QtGui import QFont, QColor
-
-from models.user import User
-from models.repair import Repair
-from models.sales import Customer
-from config.database import get_db_session
-from ui.dialogs.customer_dialog import CustomerDialog
 from services.repair_service import RepairService
-from services.print_service import PrintService
-from utils.helpers import format_currency, show_error, show_success, generate_ticket_number
+from services.sales_service import SalesService
+from ui.styles import get_stylesheet
 
 class RepairWindow(QMainWindow):
     """Repair service management window"""
     
-    def __init__(self, user: User):
+    def __init__(self, current_user):
         super().__init__()
-        self.current_user = user
-        self.repairs_data = []
-        self.customers = []
+        self.current_user = current_user
         self.repair_service = RepairService()
-        self.print_service = PrintService()
+        self.sales_service = SalesService()
+        self.current_repair = None
         
         self.setup_ui()
-        self.setup_connections()
+        self.apply_styles()
         self.load_data()
-        
+    
     def setup_ui(self):
-        """Setup user interface"""
+        """Setup the user interface"""
         self.setWindowTitle("خدمة الصيانة")
-        self.setMinimumSize(1400, 900)
+        self.setMinimumSize(1200, 700)
+        self.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
         
-        # Central widget
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         
-        # Main layout
         main_layout = QVBoxLayout()
-        central_widget.setLayout(main_layout)
+        main_layout.setSpacing(15)
+        main_layout.setContentsMargins(20, 20, 20, 20)
         
-        # Create tab widget
-        self.tab_widget = QTabWidget()
-        main_layout.addWidget(self.tab_widget)
+        # Header
+        header_layout = QHBoxLayout()
         
-        # Repairs list tab
-        self.setup_repairs_tab()
+        title_label = QLabel("إدارة خدمة الصيانة")
+        title_label.setFont(QFont("Noto Sans Arabic", 18, QFont.Weight.Bold))
+        title_label.setObjectName("title-label")
         
-        # New repair tab
-        self.setup_new_repair_tab()
+        # Add new repair button
+        self.add_repair_btn = QPushButton("استلام جهاز جديد")
+        self.add_repair_btn.clicked.connect(self.add_repair)
         
-        # Repair details tab
-        self.setup_details_tab()
+        header_layout.addWidget(title_label)
+        header_layout.addStretch()
+        header_layout.addWidget(self.add_repair_btn)
         
-    def setup_repairs_tab(self):
-        """Setup repairs list tab"""
-        repairs_widget = QWidget()
-        layout = QVBoxLayout()
+        # Search and filter section
+        filter_group = QGroupBox("البحث والفلترة")
+        filter_layout = QHBoxLayout()
         
-        # Toolbar
-        toolbar_layout = QHBoxLayout()
-        
-        # Search and filter controls
-        search_label = QLabel("البحث:")
+        # Search box
+        search_label = QLabel("بحث:")
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("البحث في رقم التذكرة، العميل، الجهاز...")
+        self.search_input.setPlaceholderText("ابحث برقم التذكرة، اسم العميل، أو نوع الجهاز...")
+        self.search_input.textChanged.connect(self.filter_repairs)
         
+        # Status filter
         status_label = QLabel("الحالة:")
         self.status_filter = QComboBox()
-        self.status_filter.addItem("جميع الحالات", None)
-        self.status_filter.addItem("تم الاستلام", "received")
-        self.status_filter.addItem("قيد الفحص", "diagnosed")
-        self.status_filter.addItem("في انتظار القطع", "waiting_parts")
-        self.status_filter.addItem("قيد الإصلاح", "in_progress")
-        self.status_filter.addItem("تم الإصلاح", "completed")
-        self.status_filter.addItem("تم التسليم", "delivered")
-        self.status_filter.addItem("ملغي", "cancelled")
+        self.status_filter.addItems(["الكل", "قيد الفحص", "قيد الانتظار", "تم الإصلاح", "غير قابل للإصلاح"])
+        self.status_filter.currentTextChanged.connect(self.filter_repairs)
         
-        priority_label = QLabel("الأولوية:")
-        self.priority_filter = QComboBox()
-        self.priority_filter.addItem("جميع الأولويات", None)
-        self.priority_filter.addItem("منخفضة", "low")
-        self.priority_filter.addItem("عادية", "normal")
-        self.priority_filter.addItem("عالية", "high")
-        self.priority_filter.addItem("عاجلة", "urgent")
+        filter_layout.addWidget(search_label)
+        filter_layout.addWidget(self.search_input)
+        filter_layout.addWidget(status_label)
+        filter_layout.addWidget(self.status_filter)
+        filter_layout.addStretch()
         
-        # Action buttons
-        self.new_repair_btn = QPushButton("استلام جهاز جديد")
-        self.edit_repair_btn = QPushButton("تعديل التذكرة")
-        self.print_receipt_btn = QPushButton("طباعة إيصال")
-        self.update_status_btn = QPushButton("تحديث الحالة")
-        
-        # Enable/disable based on permissions
-        if not self.current_user.has_permission("repairs", "create"):
-            self.new_repair_btn.setEnabled(False)
-        if not self.current_user.has_permission("repairs", "update"):
-            self.edit_repair_btn.setEnabled(False)
-            self.update_status_btn.setEnabled(False)
-        
-        toolbar_layout.addWidget(search_label)
-        toolbar_layout.addWidget(self.search_input)
-        toolbar_layout.addWidget(status_label)
-        toolbar_layout.addWidget(self.status_filter)
-        toolbar_layout.addWidget(priority_label)
-        toolbar_layout.addWidget(self.priority_filter)
-        toolbar_layout.addStretch()
-        toolbar_layout.addWidget(self.new_repair_btn)
-        toolbar_layout.addWidget(self.edit_repair_btn)
-        toolbar_layout.addWidget(self.print_receipt_btn)
-        toolbar_layout.addWidget(self.update_status_btn)
-        
-        layout.addLayout(toolbar_layout)
+        filter_group.setLayout(filter_layout)
         
         # Repairs table
         self.repairs_table = QTableWidget()
-        self.repairs_table.setColumnCount(12)
-        self.repairs_table.setHorizontalHeaderLabels([
-            "رقم التذكرة", "العميل", "الهاتف", "الجهاز", "المشكلة", "الحالة",
-            "الأولوية", "تاريخ الاستلام", "تاريخ التسليم المتوقع", "التكلفة",
-            "الفني", "الأيام في الخدمة"
-        ])
+        self.setup_repairs_table()
         
-        # Configure table
-        header = self.repairs_table.horizontalHeader()
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)  # Customer
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)  # Device
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)  # Problem
+        # Action buttons
+        buttons_layout = QHBoxLayout()
         
-        self.repairs_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.view_btn = QPushButton("عرض التفاصيل")
+        self.view_btn.clicked.connect(self.view_repair)
+        self.view_btn.setEnabled(False)
+        
+        self.edit_btn = QPushButton("تعديل")
+        self.edit_btn.clicked.connect(self.edit_repair)
+        self.edit_btn.setEnabled(False)
+        
+        self.update_status_btn = QPushButton("تحديث الحالة")
+        self.update_status_btn.clicked.connect(self.update_status)
+        self.update_status_btn.setEnabled(False)
+        
+        self.print_receipt_btn = QPushButton("طباعة إيصال")
+        self.print_receipt_btn.clicked.connect(self.print_receipt)
+        self.print_receipt_btn.setEnabled(False)
+        
+        buttons_layout.addWidget(self.view_btn)
+        buttons_layout.addWidget(self.edit_btn)
+        buttons_layout.addWidget(self.update_status_btn)
+        buttons_layout.addWidget(self.print_receipt_btn)
+        buttons_layout.addStretch()
+        
+        # Add layouts to main layout
+        main_layout.addLayout(header_layout)
+        main_layout.addWidget(filter_group)
+        main_layout.addWidget(self.repairs_table)
+        main_layout.addLayout(buttons_layout)
+        
+        central_widget.setLayout(main_layout)
+        
+        # Connect table selection
+        self.repairs_table.selectionModel().selectionChanged.connect(self.on_selection_changed)
+    
+    def setup_repairs_table(self):
+        """Setup repairs table"""
+        headers = ["رقم التذكرة", "العميل", "نوع الجهاز", "تاريخ الدخول", "الحالة", "التكلفة", "ملاحظات"]
+        
+        self.repairs_table.setColumnCount(len(headers))
+        self.repairs_table.setHorizontalHeaderLabels(headers)
+        
+        self.repairs_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.repairs_table.setAlternatingRowColors(True)
         self.repairs_table.setSortingEnabled(True)
         
-        layout.addWidget(self.repairs_table)
-        
-        # Status bar
-        status_layout = QHBoxLayout()
-        self.total_repairs_label = QLabel("إجمالي التذاكر: 0")
-        self.pending_repairs_label = QLabel("قيد الإصلاح: 0")
-        self.overdue_repairs_label = QLabel("متأخرة: 0")
-        self.completed_today_label = QLabel("مكتملة اليوم: 0")
-        
-        status_layout.addWidget(self.total_repairs_label)
-        status_layout.addWidget(self.pending_repairs_label)
-        status_layout.addWidget(self.overdue_repairs_label)
-        status_layout.addWidget(self.completed_today_label)
-        status_layout.addStretch()
-        
-        layout.addLayout(status_layout)
-        
-        repairs_widget.setLayout(layout)
-        self.tab_widget.addTab(repairs_widget, "قائمة الصيانة")
-        
-    def setup_new_repair_tab(self):
-        """Setup new repair entry tab"""
-        new_repair_widget = QWidget()
-        
-        # Scroll area for form
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        
-        form_widget = QWidget()
-        layout = QVBoxLayout()
-        
-        # Customer section
-        customer_group = QGroupBox("معلومات العميل")
-        customer_layout = QFormLayout()
-        
-        # Customer selection
-        customer_selection_layout = QHBoxLayout()
-        self.customer_combo = QComboBox()
-        self.add_customer_btn = QPushButton("عميل جديد")
-        
-        customer_selection_layout.addWidget(self.customer_combo, 2)
-        customer_selection_layout.addWidget(self.add_customer_btn)
-        
-        customer_layout.addRow("العميل:", customer_selection_layout)
-        
-        # Customer details (read-only)
-        self.customer_phone_display = QLabel("-")
-        self.customer_address_display = QLabel("-")
-        
-        customer_layout.addRow("الهاتف:", self.customer_phone_display)
-        customer_layout.addRow("العنوان:", self.customer_address_display)
-        
-        customer_group.setLayout(customer_layout)
-        layout.addWidget(customer_group)
-        
-        # Device section
-        device_group = QGroupBox("معلومات الجهاز")
-        device_layout = QFormLayout()
-        
-        self.device_model_input = QLineEdit()
-        self.device_brand_input = QLineEdit()
-        self.device_color_input = QLineEdit()
-        self.device_imei_input = QLineEdit()
-        
-        device_layout.addRow("موديل الجهاز:", self.device_model_input)
-        device_layout.addRow("الماركة:", self.device_brand_input)
-        device_layout.addRow("اللون:", self.device_color_input)
-        device_layout.addRow("IMEI:", self.device_imei_input)
-        
-        device_group.setLayout(device_layout)
-        layout.addWidget(device_group)
-        
-        # Repair details section
-        repair_group = QGroupBox("تفاصيل الصيانة")
-        repair_layout = QFormLayout()
-        
-        # Ticket number
-        self.ticket_number_input = QLineEdit()
-        self.ticket_number_input.setReadOnly(True)
-        
-        # Problem description
-        self.problem_desc_input = QTextEdit()
-        self.problem_desc_input.setMaximumHeight(100)
-        
-        # Priority
-        self.priority_combo = QComboBox()
-        self.priority_combo.addItems(["منخفضة", "عادية", "عالية", "عاجلة"])
-        self.priority_combo.setCurrentText("عادية")
-        
-        # Promised date
-        self.promised_date_input = QDateEdit()
-        self.promised_date_input.setDate(QDate.currentDate().addDays(3))
-        self.promised_date_input.setCalendarPopup(True)
-        
-        # Warranty
-        self.warranty_days_input = QSpinBox()
-        self.warranty_days_input.setMaximum(365)
-        self.warranty_days_input.setValue(30)
-        
-        self.warranty_void_checkbox = QCheckBox("الجهاز مكسور الضمان")
-        
-        repair_layout.addRow("رقم التذكرة:", self.ticket_number_input)
-        repair_layout.addRow("وصف المشكلة:", self.problem_desc_input)
-        repair_layout.addRow("الأولوية:", self.priority_combo)
-        repair_layout.addRow("تاريخ التسليم المتوقع:", self.promised_date_input)
-        repair_layout.addRow("أيام الضمان:", self.warranty_days_input)
-        repair_layout.addRow("", self.warranty_void_checkbox)
-        
-        repair_group.setLayout(repair_layout)
-        layout.addWidget(repair_group)
-        
-        # Action buttons
-        actions_layout = QHBoxLayout()
-        self.save_repair_btn = QPushButton("حفظ التذكرة")
-        self.save_and_print_btn = QPushButton("حفظ وطباعة إيصال")
-        self.clear_form_btn = QPushButton("مسح النموذج")
-        
-        actions_layout.addWidget(self.save_repair_btn)
-        actions_layout.addWidget(self.save_and_print_btn)
-        actions_layout.addWidget(self.clear_form_btn)
-        actions_layout.addStretch()
-        
-        layout.addLayout(actions_layout)
-        layout.addStretch()
-        
-        form_widget.setLayout(layout)
-        scroll_area.setWidget(form_widget)
-        
-        new_repair_layout = QVBoxLayout()
-        new_repair_layout.addWidget(scroll_area)
-        new_repair_widget.setLayout(new_repair_layout)
-        
-        self.tab_widget.addTab(new_repair_widget, "استلام جهاز جديد")
-        
-    def setup_details_tab(self):
-        """Setup repair details/edit tab"""
-        details_widget = QWidget()
-        
-        # This tab will be populated when a repair is selected
-        layout = QVBoxLayout()
-        
-        # Placeholder
-        placeholder_label = QLabel("اختر تذكرة صيانة من القائمة لعرض التفاصيل")
-        placeholder_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        placeholder_label.setStyleSheet("color: #6c757d; font-size: 14px;")
-        
-        layout.addWidget(placeholder_label)
-        
-        details_widget.setLayout(layout)
-        self.tab_widget.addTab(details_widget, "تفاصيل التذكرة")
-        
-    def setup_connections(self):
-        """Setup signal connections"""
-        # Repairs list tab
-        self.search_input.textChanged.connect(self.filter_repairs)
-        self.status_filter.currentTextChanged.connect(self.filter_repairs)
-        self.priority_filter.currentTextChanged.connect(self.filter_repairs)
-        
-        self.new_repair_btn.clicked.connect(self.switch_to_new_repair_tab)
-        self.edit_repair_btn.clicked.connect(self.edit_selected_repair)
-        self.print_receipt_btn.clicked.connect(self.print_repair_receipt)
-        self.update_status_btn.clicked.connect(self.update_repair_status)
-        
-        self.repairs_table.doubleClicked.connect(self.edit_selected_repair)
-        self.repairs_table.selectionModel().selectionChanged.connect(self.on_repair_selection_changed)
-        
-        # New repair tab
-        self.customer_combo.currentTextChanged.connect(self.on_customer_changed)
-        self.add_customer_btn.clicked.connect(self.add_customer)
-        
-        self.save_repair_btn.clicked.connect(self.save_repair)
-        self.save_and_print_btn.clicked.connect(self.save_and_print_repair)
-        self.clear_form_btn.clicked.connect(self.clear_repair_form)
-        
+        # Resize columns
+        header = self.repairs_table.horizontalHeader()
+        header.setStretchLastSection(True)
+        for i in range(len(headers)):
+            header.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
+    
+    def apply_styles(self):
+        """Apply custom styles"""
+        self.setStyleSheet(get_stylesheet("light"))
+    
     def load_data(self):
-        """Load all data"""
-        self.load_customers()
-        self.load_repairs()
-        self.generate_new_ticket_number()
-        
-    def load_customers(self):
-        """Load customers data"""
-        session = get_db_session()
-        try:
-            customers = session.query(Customer).all()
-            self.customers = customers
-            
-            # Update customer combo
-            self.customer_combo.clear()
-            self.customer_combo.addItem("اختر العميل...", None)
-            
-            for customer in customers:
-                display_text = f"{customer.name} - {customer.phone}"
-                self.customer_combo.addItem(display_text, customer.id)
-                
-        finally:
-            session.close()
-            
-    def load_repairs(self):
         """Load repairs data"""
-        session = get_db_session()
         try:
-            repairs = session.query(Repair).join(Customer).order_by(Repair.entry_date.desc()).all()
-            self.repairs_data = repairs
+            self.load_repairs()
+        except Exception as e:
+            QMessageBox.critical(self, "خطأ", f"خطأ في تحميل البيانات: {str(e)}")
+    
+    def load_repairs(self):
+        """Load repairs into table"""
+        try:
+            repairs = self.repair_service.get_repairs()
             
-            self.update_repairs_table()
-            self.update_statistics()
+            self.repairs_table.setRowCount(len(repairs))
             
-        finally:
-            session.close()
+            for row, repair in enumerate(repairs):
+                # Format entry date
+                entry_date = repair.entry_date.strftime("%Y-%m-%d") if repair.entry_date else ""
+                
+                items = [
+                    repair.ticket_no,
+                    repair.customer.name if repair.customer else "",
+                    repair.device_model,
+                    entry_date,
+                    repair.status,
+                    f"{repair.total_cost:.2f}" if repair.total_cost else "0.00",
+                    repair.notes[:50] + "..." if repair.notes and len(repair.notes) > 50 else repair.notes or ""
+                ]
+                
+                for col, item_text in enumerate(items):
+                    item = QTableWidgetItem(str(item_text))
+                    item.setData(Qt.ItemDataRole.UserRole, repair.id)
+                    
+                    # Color coding for status
+                    if col == 4:  # Status column
+                        if repair.status == "تم الإصلاح":
+                            item.setBackground(Qt.GlobalColor.green)
+                        elif repair.status == "غير قابل للإصلاح":
+                            item.setBackground(Qt.GlobalColor.red)
+                        elif repair.status == "قيد الانتظار":
+                            item.setBackground(Qt.GlobalColor.yellow)
+                    
+                    self.repairs_table.setItem(row, col, item)
             
-    def update_repairs_table(self):
-        """Update repairs table display"""
-        self.repairs_table.setRowCount(len(self.repairs_data))
-        
-        for row, repair in enumerate(self.repairs_data):
-            # Ticket number
-            self.repairs_table.setItem(row, 0, QTableWidgetItem(repair.ticket_no))
-            
-            # Customer info
-            self.repairs_table.setItem(row, 1, QTableWidgetItem(repair.customer.name))
-            self.repairs_table.setItem(row, 2, QTableWidgetItem(repair.customer.phone or ""))
-            
-            # Device info
-            device_info = f"{repair.device_brand} {repair.device_model}" if repair.device_brand else repair.device_model
-            self.repairs_table.setItem(row, 3, QTableWidgetItem(device_info))
-            
-            # Problem (truncated)
-            problem_text = repair.problem_desc[:50] + "..." if len(repair.problem_desc) > 50 else repair.problem_desc
-            self.repairs_table.setItem(row, 4, QTableWidgetItem(problem_text))
-            
-            # Status with color coding
-            status_item = QTableWidgetItem(self.get_status_display(repair.status))
-            status_item.setBackground(self.get_status_color(repair.status))
-            self.repairs_table.setItem(row, 5, status_item)
-            
-            # Priority with color coding
-            priority_item = QTableWidgetItem(self.get_priority_display(repair.priority))
-            priority_item.setBackground(self.get_priority_color(repair.priority))
-            self.repairs_table.setItem(row, 6, priority_item)
-            
-            # Dates
-            self.repairs_table.setItem(row, 7, QTableWidgetItem(repair.entry_date.strftime("%Y-%m-%d")))
-            promised_date = repair.promised_date.strftime("%Y-%m-%d") if repair.promised_date else "-"
-            self.repairs_table.setItem(row, 8, QTableWidgetItem(promised_date))
-            
-            # Cost
-            total_cost = repair.parts_cost + repair.labor_cost
-            self.repairs_table.setItem(row, 9, QTableWidgetItem(format_currency(total_cost)))
-            
-            # Technician
-            tech_name = repair.technician.name if repair.technician else "-"
-            self.repairs_table.setItem(row, 10, QTableWidgetItem(tech_name))
-            
-            # Days in service
-            days_in_service = repair.days_in_service
-            days_item = QTableWidgetItem(str(days_in_service))
-            if repair.is_overdue:
-                days_item.setBackground(QColor("#ffebee"))  # Light red
-            self.repairs_table.setItem(row, 11, days_item)
-            
-            # Store repair ID
-            self.repairs_table.item(row, 0).setData(Qt.ItemDataRole.UserRole, repair.id)
-            
-    def update_statistics(self):
-        """Update statistics labels"""
-        total_repairs = len(self.repairs_data)
-        pending_repairs = len([r for r in self.repairs_data if r.status not in ["completed", "delivered", "cancelled"]])
-        overdue_repairs = len([r for r in self.repairs_data if r.is_overdue])
-        completed_today = len([r for r in self.repairs_data if r.completed_date and r.completed_date.date() == datetime.now().date()])
-        
-        self.total_repairs_label.setText(f"إجمالي التذاكر: {total_repairs}")
-        self.pending_repairs_label.setText(f"قيد الإصلاح: {pending_repairs}")
-        self.overdue_repairs_label.setText(f"متأخرة: {overdue_repairs}")
-        self.completed_today_label.setText(f"مكتملة اليوم: {completed_today}")
-        
-    def get_status_display(self, status: str) -> str:
-        """Get Arabic display text for status"""
-        status_map = {
-            "received": "تم الاستلام",
-            "diagnosed": "قيد الفحص",
-            "waiting_parts": "في انتظار القطع",
-            "in_progress": "قيد الإصلاح",
-            "completed": "تم الإصلاح",
-            "delivered": "تم التسليم",
-            "cancelled": "ملغي"
-        }
-        return status_map.get(status, status)
-        
-    def get_status_color(self, status: str) -> QColor:
-        """Get color for status"""
-        color_map = {
-            "received": QColor("#e3f2fd"),      # Light blue
-            "diagnosed": QColor("#fff3e0"),     # Light orange
-            "waiting_parts": QColor("#fce4ec"), # Light pink
-            "in_progress": QColor("#e8f5e8"),   # Light green
-            "completed": QColor("#e8f5e8"),     # Light green
-            "delivered": QColor("#f3e5f5"),     # Light purple
-            "cancelled": QColor("#ffebee")      # Light red
-        }
-        return color_map.get(status, QColor("#ffffff"))
-        
-    def get_priority_display(self, priority: str) -> str:
-        """Get Arabic display text for priority"""
-        priority_map = {
-            "low": "منخفضة",
-            "normal": "عادية",
-            "high": "عالية",
-            "urgent": "عاجلة"
-        }
-        return priority_map.get(priority, priority)
-        
-    def get_priority_color(self, priority: str) -> QColor:
-        """Get color for priority"""
-        color_map = {
-            "low": QColor("#e8f5e8"),      # Light green
-            "normal": QColor("#e3f2fd"),   # Light blue
-            "high": QColor("#fff3e0"),     # Light orange
-            "urgent": QColor("#ffebee")    # Light red
-        }
-        return color_map.get(priority, QColor("#ffffff"))
-        
+        except Exception as e:
+            QMessageBox.critical(self, "خطأ", f"خطأ في تحميل الصيانات: {str(e)}")
+    
     def filter_repairs(self):
         """Filter repairs based on search criteria"""
         search_text = self.search_input.text().lower()
-        status = self.status_filter.currentData()
-        priority = self.priority_filter.currentData()
+        status = self.status_filter.currentText()
         
         for row in range(self.repairs_table.rowCount()):
             show_row = True
@@ -476,183 +196,359 @@ class RepairWindow(QMainWindow):
             if search_text:
                 ticket_no = self.repairs_table.item(row, 0).text().lower()
                 customer = self.repairs_table.item(row, 1).text().lower()
-                device = self.repairs_table.item(row, 3).text().lower()
-                problem = self.repairs_table.item(row, 4).text().lower()
-                
-                if not any(search_text in text for text in [ticket_no, customer, device, problem]):
+                device = self.repairs_table.item(row, 2).text().lower()
+                if (search_text not in ticket_no and 
+                    search_text not in customer and 
+                    search_text not in device):
                     show_row = False
             
             # Status filter
-            if status and show_row:
-                repair_id = self.repairs_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
-                repair = next((r for r in self.repairs_data if r.id == repair_id), None)
-                if repair and repair.status != status:
-                    show_row = False
-            
-            # Priority filter
-            if priority and show_row:
-                repair_id = self.repairs_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
-                repair = next((r for r in self.repairs_data if r.id == repair_id), None)
-                if repair and repair.priority != priority:
+            if status != "الكل" and show_row:
+                repair_status = self.repairs_table.item(row, 4).text()
+                if status != repair_status:
                     show_row = False
             
             self.repairs_table.setRowHidden(row, not show_row)
-            
-    def on_repair_selection_changed(self):
-        """Handle repair selection change"""
-        has_selection = bool(self.repairs_table.selectedItems())
-        self.edit_repair_btn.setEnabled(has_selection and self.current_user.has_permission("repairs", "update"))
+    
+    def on_selection_changed(self):
+        """Handle table selection change"""
+        selected_rows = self.repairs_table.selectionModel().selectedRows()
+        has_selection = len(selected_rows) > 0
+        
+        self.view_btn.setEnabled(has_selection)
+        self.edit_btn.setEnabled(has_selection)
+        self.update_status_btn.setEnabled(has_selection)
         self.print_receipt_btn.setEnabled(has_selection)
-        self.update_status_btn.setEnabled(has_selection and self.current_user.has_permission("repairs", "update"))
         
-    def on_customer_changed(self):
-        """Handle customer selection change"""
-        customer_id = self.customer_combo.currentData()
-        
-        if customer_id:
-            customer = next((c for c in self.customers if c.id == customer_id), None)
-            if customer:
-                self.customer_phone_display.setText(customer.phone or "-")
-                self.customer_address_display.setText(customer.address or "-")
-            else:
-                self.customer_phone_display.setText("-")
-                self.customer_address_display.setText("-")
-        else:
-            self.customer_phone_display.setText("-")
-            self.customer_address_display.setText("-")
-            
-    def generate_new_ticket_number(self):
-        """Generate new ticket number"""
-        self.ticket_number_input.setText(generate_ticket_number())
-        
-    def switch_to_new_repair_tab(self):
-        """Switch to new repair tab"""
-        self.tab_widget.setCurrentIndex(1)
-        self.clear_repair_form()
-        
-    def clear_repair_form(self):
-        """Clear new repair form"""
-        self.customer_combo.setCurrentIndex(0)
-        self.device_model_input.clear()
-        self.device_brand_input.clear()
-        self.device_color_input.clear()
-        self.device_imei_input.clear()
-        self.problem_desc_input.clear()
-        self.priority_combo.setCurrentText("عادية")
-        self.promised_date_input.setDate(QDate.currentDate().addDays(3))
-        self.warranty_days_input.setValue(30)
-        self.warranty_void_checkbox.setChecked(False)
-        self.generate_new_ticket_number()
-        
-    def add_customer(self):
-        """Add new customer"""
-        dialog = CustomerDialog(self, self.current_user)
-        if dialog.exec() == dialog.DialogCode.Accepted:
-            self.load_customers()
-            show_success(self, "تم إضافة العميل بنجاح")
-            
-    def save_repair(self):
-        """Save new repair"""
-        if not self.validate_repair_form():
-            return False
-        
-        try:
-            repair_data = self.get_repair_form_data()
-            repair_id = self.repair_service.create_repair(repair_data, self.current_user.id)
-            
-            if repair_id:
-                show_success(self, f"تم حفظ تذكرة الصيانة رقم {self.ticket_number_input.text()} بنجاح")
+        if has_selection:
+            row = selected_rows[0].row()
+            repair_id = self.repairs_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+            self.current_repair = self.repair_service.get_repair_by_id(repair_id)
+    
+    def add_repair(self):
+        """Add new repair"""
+        dialog = RepairDialog(self, self.repair_service, self.sales_service)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.load_repairs()
+    
+    def view_repair(self):
+        """View repair details"""
+        if self.current_repair:
+            dialog = RepairViewDialog(self, self.current_repair)
+            dialog.exec()
+    
+    def edit_repair(self):
+        """Edit selected repair"""
+        if self.current_repair:
+            dialog = RepairDialog(self, self.repair_service, self.sales_service, self.current_repair)
+            if dialog.exec() == QDialog.DialogCode.Accepted:
                 self.load_repairs()
-                self.clear_repair_form()
-                self.tab_widget.setCurrentIndex(0)  # Switch to repairs list
-                return True
-            else:
-                show_error(self, "فشل في حفظ تذكرة الصيانة")
-                return False
+    
+    def update_status(self):
+        """Update repair status"""
+        if self.current_repair:
+            dialog = StatusUpdateDialog(self, self.current_repair)
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                self.load_repairs()
+    
+    def print_receipt(self):
+        """Print repair receipt"""
+        if self.current_repair:
+            QMessageBox.information(self, "طباعة", f"سيتم طباعة إيصال الصيانة رقم: {self.current_repair.ticket_no}")
+
+class RepairDialog(QDialog):
+    """Dialog for adding/editing repairs"""
+    
+    def __init__(self, parent, repair_service, sales_service, repair=None):
+        super().__init__(parent)
+        self.repair_service = repair_service
+        self.sales_service = sales_service
+        self.repair = repair
+        self.is_edit_mode = repair is not None
+        
+        self.setup_ui()
+        if self.is_edit_mode:
+            self.load_repair_data()
+    
+    def setup_ui(self):
+        """Setup dialog UI"""
+        title = "تعديل الصيانة" if self.is_edit_mode else "استلام جهاز جديد"
+        self.setWindowTitle(title)
+        self.setModal(True)
+        self.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+        self.resize(600, 500)
+        
+        layout = QVBoxLayout()
+        
+        # Form layout
+        form_layout = QFormLayout()
+        
+        # Customer selection
+        self.customer_combo = QComboBox()
+        self.load_customers()
+        
+        add_customer_btn = QPushButton("عميل جديد")
+        add_customer_btn.clicked.connect(self.add_customer)
+        
+        customer_layout = QHBoxLayout()
+        customer_layout.addWidget(self.customer_combo)
+        customer_layout.addWidget(add_customer_btn)
+        
+        # Device and problem details
+        self.device_input = QLineEdit()
+        self.problem_input = QTextEdit()
+        self.problem_input.setMaximumHeight(100)
+        
+        # Status and costs
+        self.status_combo = QComboBox()
+        self.status_combo.addItems(["قيد الفحص", "قيد الانتظار", "تم الإصلاح", "غير قابل للإصلاح"])
+        
+        self.parts_cost_input = QDoubleSpinBox()
+        self.parts_cost_input.setMaximum(999999.99)
+        self.parts_cost_input.setDecimals(2)
+        
+        self.labor_cost_input = QDoubleSpinBox()
+        self.labor_cost_input.setMaximum(999999.99)
+        self.labor_cost_input.setDecimals(2)
+        
+        # Notes
+        self.notes_input = QTextEdit()
+        self.notes_input.setMaximumHeight(80)
+        
+        # Add fields to form
+        form_layout.addRow("العميل:", customer_layout)
+        form_layout.addRow("نوع/موديل الجهاز:", self.device_input)
+        form_layout.addRow("وصف المشكلة:", self.problem_input)
+        form_layout.addRow("الحالة:", self.status_combo)
+        form_layout.addRow("تكلفة القطع:", self.parts_cost_input)
+        form_layout.addRow("تكلفة العمالة:", self.labor_cost_input)
+        form_layout.addRow("ملاحظات:", self.notes_input)
+        
+        # Buttons
+        buttons_layout = QHBoxLayout()
+        
+        self.save_btn = QPushButton("حفظ")
+        self.save_btn.clicked.connect(self.save_repair)
+        
+        self.cancel_btn = QPushButton("إلغاء")
+        self.cancel_btn.clicked.connect(self.reject)
+        
+        buttons_layout.addWidget(self.save_btn)
+        buttons_layout.addWidget(self.cancel_btn)
+        
+        layout.addLayout(form_layout)
+        layout.addLayout(buttons_layout)
+        
+        self.setLayout(layout)
+    
+    def load_customers(self):
+        """Load customers into combo box"""
+        try:
+            customers = self.sales_service.get_customers()
+            self.customer_combo.clear()
+            
+            for customer in customers:
+                self.customer_combo.addItem(customer.name, customer.id)
                 
         except Exception as e:
-            logging.error(f"Save repair error: {e}")
-            show_error(self, f"خطأ في حفظ تذكرة الصيانة:\n{str(e)}")
-            return False
-            
-    def save_and_print_repair(self):
-        """Save repair and print receipt"""
-        if self.save_repair():
-            # Find the saved repair and print receipt
-            # This would need the repair ID from save_repair
-            pass
-            
-    def validate_repair_form(self):
-        """Validate repair form data"""
-        if not self.customer_combo.currentData():
-            show_error(self, "يرجى اختيار العميل")
-            return False
-        
-        if not self.device_model_input.text().strip():
-            show_error(self, "يرجى إدخال موديل الجهاز")
-            return False
-        
-        if not self.problem_desc_input.toPlainText().strip():
-            show_error(self, "يرجى وصف المشكلة")
-            return False
-        
-        return True
-        
-    def get_repair_form_data(self):
-        """Get repair form data"""
-        priority_map = {
-            "منخفضة": "low",
-            "عادية": "normal",
-            "عالية": "high",
-            "عاجلة": "urgent"
-        }
-        
-        return {
-            'ticket_no': self.ticket_number_input.text(),
-            'customer_id': self.customer_combo.currentData(),
-            'device_model': self.device_model_input.text().strip(),
-            'device_brand': self.device_brand_input.text().strip() or None,
-            'device_color': self.device_color_input.text().strip() or None,
-            'device_imei': self.device_imei_input.text().strip() or None,
-            'problem_desc': self.problem_desc_input.toPlainText().strip(),
-            'priority': priority_map[self.priority_combo.currentText()],
-            'promised_date': self.promised_date_input.date().toPython(),
-            'warranty_days': self.warranty_days_input.value(),
-            'is_warranty_void': self.warranty_void_checkbox.isChecked()
-        }
-        
-    def edit_selected_repair(self):
-        """Edit selected repair"""
-        selected_items = self.repairs_table.selectedItems()
-        if not selected_items:
-            show_error(self, "يرجى اختيار تذكرة للتعديل")
+            QMessageBox.critical(self, "خطأ", f"خطأ في تحميل العملاء: {str(e)}")
+    
+    def add_customer(self):
+        """Add new customer"""
+        from ui.sales_window import CustomerDialog
+        dialog = CustomerDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.load_customers()
+    
+    def load_repair_data(self):
+        """Load existing repair data for editing"""
+        if not self.repair:
             return
         
-        # This would open a detailed edit dialog or populate the details tab
-        show_error(self, "ميزة تعديل تذاكر الصيانة قيد التطوير")
+        # Set customer
+        if self.repair.customer_id:
+            for i in range(self.customer_combo.count()):
+                if self.customer_combo.itemData(i) == self.repair.customer_id:
+                    self.customer_combo.setCurrentIndex(i)
+                    break
         
-    def print_repair_receipt(self):
-        """Print repair receipt"""
-        selected_items = self.repairs_table.selectedItems()
-        if not selected_items:
-            show_error(self, "يرجى اختيار تذكرة للطباعة")
-            return
+        self.device_input.setText(self.repair.device_model)
+        self.problem_input.setPlainText(self.repair.problem_desc)
         
-        row = selected_items[0].row()
-        repair_id = self.repairs_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+        # Set status
+        status_index = self.status_combo.findText(self.repair.status)
+        if status_index >= 0:
+            self.status_combo.setCurrentIndex(status_index)
         
-        session = get_db_session()
+        self.parts_cost_input.setValue(self.repair.parts_cost)
+        self.labor_cost_input.setValue(self.repair.labor_cost)
+        self.notes_input.setPlainText(self.repair.notes or "")
+    
+    def save_repair(self):
+        """Save repair data"""
         try:
-            repair = session.query(Repair).get(repair_id)
-            if repair:
-                self.print_service.print_repair_receipt(repair)
-                show_success(self, "تم إرسال إيصال الصيانة للطباعة")
-        except Exception as e:
-            logging.error(f"Print repair receipt error: {e}")
-            show_error(self, f"خطأ في طباعة إيصال الصيانة:\n{str(e)}")
-        finally:
-            session.close()
+            # Validate required fields
+            if not self.customer_combo.currentData():
+                QMessageBox.warning(self, "تحذير", "يرجى اختيار العميل")
+                return
             
-    def update_repair_status(self):
+            if not self.device_input.text().strip():
+                QMessageBox.warning(self, "تحذير", "يرجى إدخال نوع الجهاز")
+                return
+            
+            if not self.problem_input.toPlainText().strip():
+                QMessageBox.warning(self, "تحذير", "يرجى إدخال وصف المشكلة")
+                return
+            
+            # Prepare repair data
+            repair_data = {
+                'customer_id': self.customer_combo.currentData(),
+                'device_model': self.device_input.text().strip(),
+                'problem_desc': self.problem_input.toPlainText().strip(),
+                'status': self.status_combo.currentText(),
+                'parts_cost': self.parts_cost_input.value(),
+                'labor_cost': self.labor_cost_input.value(),
+                'notes': self.notes_input.toPlainText().strip() or None
+            }
+            
+            # Save repair
+            if self.is_edit_mode:
+                self.repair_service.update_repair(self.repair.id, repair_data)
+                QMessageBox.information(self, "نجح", "تم تحديث بيانات الصيانة بنجاح")
+            else:
+                repair = self.repair_service.create_repair(repair_data, self.parent().current_user.id)
+                QMessageBox.information(self, "نجح", f"تم إنشاء تذكرة صيانة رقم: {repair.ticket_no}")
+            
+            self.accept()
+            
+        except Exception as e:
+            QMessageBox.critical(self, "خطأ", f"خطأ في حفظ الصيانة: {str(e)}")
+
+class RepairViewDialog(QDialog):
+    """Dialog for viewing repair details"""
+    
+    def __init__(self, parent, repair):
+        super().__init__(parent)
+        self.repair = repair
+        self.setup_ui()
+    
+    def setup_ui(self):
+        """Setup dialog UI"""
+        self.setWindowTitle(f"تفاصيل الصيانة - {self.repair.ticket_no}")
+        self.setModal(True)
+        self.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+        self.resize(500, 400)
+        
+        layout = QVBoxLayout()
+        
+        # Title
+        title_label = QLabel(f"تذكرة رقم: {self.repair.ticket_no}")
+        title_label.setFont(QFont("Noto Sans Arabic", 16, QFont.Weight.Bold))
+        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
+        # Details
+        details_text = f"""
+        العميل: {self.repair.customer.name if self.repair.customer else 'غير محدد'}
+        رقم الهاتف: {self.repair.customer.phone if self.repair.customer and self.repair.customer.phone else 'غير محدد'}
+        
+        نوع الجهاز: {self.repair.device_model}
+        وصف المشكلة: {self.repair.problem_desc}
+        
+        الحالة: {self.repair.status}
+        تاريخ الدخول: {self.repair.entry_date.strftime('%Y-%m-%d %H:%M') if self.repair.entry_date else 'غير محدد'}
+        تاريخ الخروج: {self.repair.exit_date.strftime('%Y-%m-%d %H:%M') if self.repair.exit_date else 'لم يتم بعد'}
+        
+        تكلفة القطع: {self.repair.parts_cost:.2f} جنيه
+        تكلفة العمالة: {self.repair.labor_cost:.2f} جنيه
+        التكلفة الإجمالية: {self.repair.total_cost:.2f} جنيه
+        
+        ملاحظات: {self.repair.notes or 'لا توجد ملاحظات'}
+        """
+        
+        details_label = QLabel(details_text)
+        details_label.setWordWrap(True)
+        details_label.setStyleSheet("QLabel { padding: 10px; background-color: #f5f5f5; border: 1px solid #ddd; }")
+        
+        # Close button
+        close_btn = QPushButton("إغلاق")
+        close_btn.clicked.connect(self.accept)
+        
+        layout.addWidget(title_label)
+        layout.addWidget(details_label)
+        layout.addWidget(close_btn)
+        
+        self.setLayout(layout)
+
+class StatusUpdateDialog(QDialog):
+    """Dialog for updating repair status"""
+    
+    def __init__(self, parent, repair):
+        super().__init__(parent)
+        self.repair = repair
+        self.repair_service = RepairService()
+        self.setup_ui()
+    
+    def setup_ui(self):
+        """Setup dialog UI"""
+        self.setWindowTitle(f"تحديث حالة الصيانة - {self.repair.ticket_no}")
+        self.setModal(True)
+        self.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+        self.resize(400, 200)
+        
+        layout = QVBoxLayout()
+        
+        # Current status
+        current_label = QLabel(f"الحالة الحالية: {self.repair.status}")
+        current_label.setFont(QFont("Noto Sans Arabic", 11, QFont.Weight.Bold))
+        
+        # New status
+        form_layout = QFormLayout()
+        
+        self.status_combo = QComboBox()
+        self.status_combo.addItems(["قيد الفحص", "قيد الانتظار", "تم الإصلاح", "غير قابل للإصلاح"])
+        
+        # Set current status
+        current_index = self.status_combo.findText(self.repair.status)
+        if current_index >= 0:
+            self.status_combo.setCurrentIndex(current_index)
+        
+        form_layout.addRow("الحالة الجديدة:", self.status_combo)
+        
+        # Buttons
+        buttons_layout = QHBoxLayout()
+        
+        update_btn = QPushButton("تحديث")
+        update_btn.clicked.connect(self.update_status)
+        
+        cancel_btn = QPushButton("إلغاء")
+        cancel_btn.clicked.connect(self.reject)
+        
+        buttons_layout.addWidget(update_btn)
+        buttons_layout.addWidget(cancel_btn)
+        
+        layout.addWidget(current_label)
+        layout.addLayout(form_layout)
+        layout.addLayout(buttons_layout)
+        
+        self.setLayout(layout)
+    
+    def update_status(self):
         """Update repair status"""
-        show_error(self, "ميزة تحديث حالة الصيانة قيد التطوير")
+        try:
+            new_status = self.status_combo.currentText()
+            if new_status == self.repair.status:
+                QMessageBox.information(self, "تنبيه", "لم يتم تغيير الحالة")
+                return
+            
+            update_data = {'status': new_status}
+            
+            # Set exit date if status is completed
+            if new_status == "تم الإصلاح":
+                update_data['exit_date'] = datetime.now()
+            
+            self.repair_service.update_repair(self.repair.id, update_data)
+            QMessageBox.information(self, "نجح", f"تم تحديث الحالة إلى: {new_status}")
+            self.accept()
+            
+        except Exception as e:
+            QMessageBox.critical(self, "خطأ", f"خطأ في تحديث الحالة: {str(e)}")

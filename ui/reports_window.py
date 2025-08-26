@@ -1,835 +1,578 @@
-# -*- coding: utf-8 -*-
-"""
-Reports and analytics window
-"""
-
-import logging
+from PyQt6.QtWidgets import (QMainWindow, QVBoxLayout, QHBoxLayout, QWidget, 
+                            QLabel, QPushButton, QTableWidget, QTableWidgetItem,
+                            QComboBox, QDateEdit, QTextEdit, QTabWidget,
+                            QGroupBox, QHeaderView, QAbstractItemView, QSplitter,
+                            QMessageBox, QProgressBar)
+from PyQt6.QtCore import Qt, QDate, QThread, pyqtSignal
+from PyQt6.QtGui import QFont
 from datetime import datetime, timedelta
-from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-                            QTableWidget, QTableWidgetItem, QPushButton, QLabel,
-                            QLineEdit, QComboBox, QDateEdit, QTextEdit,
-                            QMessageBox, QHeaderView, QFrame, QGroupBox,
-                            QFormLayout, QTabWidget, QSplitter, QScrollArea,
-                            QProgressBar, QCheckBox)
-from PyQt6.QtCore import Qt, QDate, pyqtSignal, QThread
-from PyQt6.QtGui import QFont, QColor, QPixmap
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 import matplotlib.dates as mdates
 
-from models.user import User
-from config.database import get_db_session
 from services.report_service import ReportService
-from utils.helpers import format_currency, show_error, show_success, export_to_excel
+from ui.styles import get_stylesheet
+from utils.excel_export import ExcelExporter
 
 class ReportsWindow(QMainWindow):
     """Reports and analytics window"""
     
-    def __init__(self, user: User):
+    def __init__(self, current_user):
         super().__init__()
-        self.current_user = user
+        self.current_user = current_user
         self.report_service = ReportService()
+        self.excel_exporter = ExcelExporter()
         
         self.setup_ui()
-        self.setup_connections()
-        self.load_initial_data()
-        
+        self.apply_styles()
+        self.setup_matplotlib()
+    
     def setup_ui(self):
-        """Setup user interface"""
-        self.setWindowTitle("التقارير والإحصائيات")
-        self.setMinimumSize(1400, 900)
+        """Setup the user interface"""
+        self.setWindowTitle("التقارير والتحليلات")
+        self.setMinimumSize(1400, 800)
+        self.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
         
-        # Central widget
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         
-        # Main layout
         main_layout = QVBoxLayout()
+        main_layout.setSpacing(15)
+        main_layout.setContentsMargins(20, 20, 20, 20)
+        
+        # Header
+        header_layout = QHBoxLayout()
+        
+        title_label = QLabel("التقارير والتحليلات")
+        title_label.setFont(QFont("Noto Sans Arabic", 18, QFont.Weight.Bold))
+        title_label.setObjectName("title-label")
+        
+        # Export button
+        self.export_btn = QPushButton("تصدير إلى Excel")
+        self.export_btn.clicked.connect(self.export_to_excel)
+        
+        header_layout.addWidget(title_label)
+        header_layout.addStretch()
+        header_layout.addWidget(self.export_btn)
+        
+        # Date range selection
+        date_group = QGroupBox("فترة التقرير")
+        date_layout = QHBoxLayout()
+        
+        from_label = QLabel("من تاريخ:")
+        self.from_date = QDateEdit()
+        self.from_date.setDate(QDate.currentDate().addDays(-30))
+        self.from_date.setCalendarPopup(True)
+        self.from_date.dateChanged.connect(self.refresh_reports)
+        
+        to_label = QLabel("إلى تاريخ:")
+        self.to_date = QDateEdit()
+        self.to_date.setDate(QDate.currentDate())
+        self.to_date.setCalendarPopup(True)
+        self.to_date.dateChanged.connect(self.refresh_reports)
+        
+        self.refresh_btn = QPushButton("تحديث التقارير")
+        self.refresh_btn.clicked.connect(self.refresh_reports)
+        
+        date_layout.addWidget(from_label)
+        date_layout.addWidget(self.from_date)
+        date_layout.addWidget(to_label)
+        date_layout.addWidget(self.to_date)
+        date_layout.addWidget(self.refresh_btn)
+        date_layout.addStretch()
+        
+        date_group.setLayout(date_layout)
+        
+        # Tab widget for different report types
+        self.tabs = QTabWidget()
+        
+        # Sales report tab
+        self.sales_tab = self.create_sales_tab()
+        self.tabs.addTab(self.sales_tab, "تقرير المبيعات")
+        
+        # Profit report tab
+        self.profit_tab = self.create_profit_tab()
+        self.tabs.addTab(self.profit_tab, "تقرير الأرباح")
+        
+        # Inventory report tab
+        self.inventory_tab = self.create_inventory_tab()
+        self.tabs.addTab(self.inventory_tab, "تقرير المخزون")
+        
+        # Products report tab
+        self.products_tab = self.create_products_tab()
+        self.tabs.addTab(self.products_tab, "أكثر المنتجات مبيعاً")
+        
+        # Charts tab
+        self.charts_tab = self.create_charts_tab()
+        self.tabs.addTab(self.charts_tab, "الرسوم البيانية")
+        
+        # Add layouts to main layout
+        main_layout.addLayout(header_layout)
+        main_layout.addWidget(date_group)
+        main_layout.addWidget(self.tabs)
+        
         central_widget.setLayout(main_layout)
         
-        # Create tab widget
-        self.tab_widget = QTabWidget()
-        main_layout.addWidget(self.tab_widget)
-        
-        # Dashboard tab
-        self.setup_dashboard_tab()
-        
-        # Sales reports tab
-        self.setup_sales_reports_tab()
-        
-        # Inventory reports tab
-        self.setup_inventory_reports_tab()
-        
-        # Repair reports tab
-        self.setup_repair_reports_tab()
-        
-        # Transfer reports tab
-        self.setup_transfer_reports_tab()
-        
-        # Financial reports tab
-        self.setup_financial_reports_tab()
-        
-    def setup_dashboard_tab(self):
-        """Setup dashboard tab with overview charts"""
-        dashboard_widget = QWidget()
+        # Load initial data
+        self.refresh_reports()
+    
+    def create_sales_tab(self):
+        """Create sales report tab"""
+        tab = QWidget()
         layout = QVBoxLayout()
         
-        # Date range selector
-        date_range_layout = QHBoxLayout()
-        
-        self.date_from = QDateEdit()
-        self.date_from.setDate(QDate.currentDate().addDays(-30))
-        self.date_from.setCalendarPopup(True)
-        
-        self.date_to = QDateEdit()
-        self.date_to.setDate(QDate.currentDate())
-        self.date_to.setCalendarPopup(True)
-        
-        self.refresh_dashboard_btn = QPushButton("تحديث اللوحة")
-        
-        date_range_layout.addWidget(QLabel("من تاريخ:"))
-        date_range_layout.addWidget(self.date_from)
-        date_range_layout.addWidget(QLabel("إلى تاريخ:"))
-        date_range_layout.addWidget(self.date_to)
-        date_range_layout.addWidget(self.refresh_dashboard_btn)
-        date_range_layout.addStretch()
-        
-        layout.addLayout(date_range_layout)
-        
-        # Key metrics cards
-        metrics_layout = QHBoxLayout()
-        
-        # Today's sales card
-        self.today_sales_card = self.create_metric_card("مبيعات اليوم", "0 ج.م", "#28a745")
-        # Monthly sales card
-        self.monthly_sales_card = self.create_metric_card("مبيعات الشهر", "0 ج.م", "#007bff")
-        # Total profit card
-        self.profit_card = self.create_metric_card("صافي الربح", "0 ج.م", "#17a2b8")
-        # Low stock items card
-        self.low_stock_card = self.create_metric_card("منتجات منخفضة", "0", "#ffc107")
-        
-        metrics_layout.addWidget(self.today_sales_card)
-        metrics_layout.addWidget(self.monthly_sales_card)
-        metrics_layout.addWidget(self.profit_card)
-        metrics_layout.addWidget(self.low_stock_card)
-        
-        layout.addLayout(metrics_layout)
-        
-        # Charts section
-        charts_splitter = QSplitter(Qt.Orientation.Horizontal)
-        
-        # Sales trend chart
-        sales_chart_widget = QWidget()
-        sales_chart_layout = QVBoxLayout()
-        sales_chart_layout.addWidget(QLabel("اتجاه المبيعات الشهرية"))
-        
-        self.sales_chart = self.create_chart_widget()
-        sales_chart_layout.addWidget(self.sales_chart)
-        sales_chart_widget.setLayout(sales_chart_layout)
-        
-        # Top products chart
-        products_chart_widget = QWidget()
-        products_chart_layout = QVBoxLayout()
-        products_chart_layout.addWidget(QLabel("أكثر المنتجات مبيعاً"))
-        
-        self.products_chart = self.create_chart_widget()
-        products_chart_layout.addWidget(self.products_chart)
-        products_chart_widget.setLayout(products_chart_layout)
-        
-        charts_splitter.addWidget(sales_chart_widget)
-        charts_splitter.addWidget(products_chart_widget)
-        
-        layout.addWidget(charts_splitter)
-        
-        dashboard_widget.setLayout(layout)
-        self.tab_widget.addTab(dashboard_widget, "لوحة المعلومات")
-        
-    def setup_sales_reports_tab(self):
-        """Setup sales reports tab"""
-        sales_widget = QWidget()
-        layout = QVBoxLayout()
-        
-        # Filter controls
-        filter_layout = QHBoxLayout()
-        
-        self.sales_date_from = QDateEdit()
-        self.sales_date_from.setDate(QDate.currentDate().addDays(-30))
-        self.sales_date_from.setCalendarPopup(True)
-        
-        self.sales_date_to = QDateEdit()
-        self.sales_date_to.setDate(QDate.currentDate())
-        self.sales_date_to.setCalendarPopup(True)
-        
-        self.sales_user_filter = QComboBox()
-        self.sales_user_filter.addItem("جميع المستخدمين", None)
-        
-        self.generate_sales_report_btn = QPushButton("إنشاء التقرير")
-        self.export_sales_btn = QPushButton("تصدير Excel")
-        
-        filter_layout.addWidget(QLabel("من:"))
-        filter_layout.addWidget(self.sales_date_from)
-        filter_layout.addWidget(QLabel("إلى:"))
-        filter_layout.addWidget(self.sales_date_to)
-        filter_layout.addWidget(QLabel("المستخدم:"))
-        filter_layout.addWidget(self.sales_user_filter)
-        filter_layout.addWidget(self.generate_sales_report_btn)
-        filter_layout.addWidget(self.export_sales_btn)
-        filter_layout.addStretch()
-        
-        layout.addLayout(filter_layout)
-        
-        # Sales summary
+        # Summary section
+        summary_group = QGroupBox("ملخص المبيعات")
         summary_layout = QHBoxLayout()
         
-        self.sales_summary_labels = {
-            'total_sales': QLabel("إجمالي المبيعات: 0 ج.م"),
-            'total_invoices': QLabel("عدد الفواتير: 0"),
-            'average_invoice': QLabel("متوسط الفاتورة: 0 ج.م"),
-            'total_profit': QLabel("إجمالي الربح: 0 ج.م")
-        }
+        self.total_sales_label = QLabel("إجمالي المبيعات: 0.00 جنيه")
+        self.total_sales_label.setFont(QFont("Noto Sans Arabic", 12, QFont.Weight.Bold))
         
-        for label in self.sales_summary_labels.values():
-            label.setFont(QFont("Cairo", 11, QFont.Weight.Bold))
-            summary_layout.addWidget(label)
+        self.total_transactions_label = QLabel("عدد المعاملات: 0")
+        self.average_transaction_label = QLabel("متوسط المعاملة: 0.00 جنيه")
         
-        layout.addLayout(summary_layout)
+        summary_layout.addWidget(self.total_sales_label)
+        summary_layout.addWidget(self.total_transactions_label)
+        summary_layout.addWidget(self.average_transaction_label)
+        summary_layout.addStretch()
+        
+        summary_group.setLayout(summary_layout)
         
         # Sales table
-        self.sales_report_table = QTableWidget()
-        self.sales_report_table.setColumnCount(8)
-        self.sales_report_table.setHorizontalHeaderLabels([
-            "رقم الفاتورة", "التاريخ", "العميل", "إجمالي الفاتورة",
-            "الخصم", "الضريبة", "المستخدم", "الربح"
-        ])
+        self.sales_table = QTableWidget()
+        self.setup_sales_table()
         
-        header = self.sales_report_table.horizontalHeader()
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        layout.addWidget(summary_group)
+        layout.addWidget(self.sales_table)
         
-        layout.addWidget(self.sales_report_table)
-        
-        sales_widget.setLayout(layout)
-        self.tab_widget.addTab(sales_widget, "تقارير المبيعات")
-        
-    def setup_inventory_reports_tab(self):
-        """Setup inventory reports tab"""
-        inventory_widget = QWidget()
+        tab.setLayout(layout)
+        return tab
+    
+    def create_profit_tab(self):
+        """Create profit report tab"""
+        tab = QWidget()
         layout = QVBoxLayout()
         
-        # Report type selector
-        report_type_layout = QHBoxLayout()
+        # Profit summary
+        profit_group = QGroupBox("ملخص الأرباح")
+        profit_layout = QHBoxLayout()
         
-        self.inventory_report_type = QComboBox()
-        self.inventory_report_type.addItem("تقرير المخزون الحالي", "current_stock")
-        self.inventory_report_type.addItem("المنتجات المنخفضة", "low_stock")
-        self.inventory_report_type.addItem("حركة المخزون", "stock_movements")
-        self.inventory_report_type.addItem("أكثر المنتجات مبيعاً", "top_selling")
-        self.inventory_report_type.addItem("المنتجات غير المباعة", "non_selling")
+        self.revenue_label = QLabel("الإيرادات: 0.00 جنيه")
+        self.revenue_label.setFont(QFont("Noto Sans Arabic", 12, QFont.Weight.Bold))
         
-        self.generate_inventory_report_btn = QPushButton("إنشاء التقرير")
-        self.export_inventory_btn = QPushButton("تصدير Excel")
+        self.cost_label = QLabel("التكلفة: 0.00 جنيه")
+        self.profit_label = QLabel("الربح: 0.00 جنيه")
+        self.margin_label = QLabel("هامش الربح: 0.00%")
         
-        report_type_layout.addWidget(QLabel("نوع التقرير:"))
-        report_type_layout.addWidget(self.inventory_report_type)
-        report_type_layout.addWidget(self.generate_inventory_report_btn)
-        report_type_layout.addWidget(self.export_inventory_btn)
-        report_type_layout.addStretch()
+        profit_layout.addWidget(self.revenue_label)
+        profit_layout.addWidget(self.cost_label)
+        profit_layout.addWidget(self.profit_label)
+        profit_layout.addWidget(self.margin_label)
+        profit_layout.addStretch()
         
-        layout.addLayout(report_type_layout)
+        profit_group.setLayout(profit_layout)
+        
+        # Profit details text
+        self.profit_details = QTextEdit()
+        self.profit_details.setReadOnly(True)
+        self.profit_details.setMaximumHeight(200)
+        
+        layout.addWidget(profit_group)
+        layout.addWidget(QLabel("تفاصيل الأرباح:"))
+        layout.addWidget(self.profit_details)
+        
+        tab.setLayout(layout)
+        return tab
+    
+    def create_inventory_tab(self):
+        """Create inventory report tab"""
+        tab = QWidget()
+        layout = QVBoxLayout()
+        
+        # Inventory summary
+        inv_group = QGroupBox("ملخص المخزون")
+        inv_layout = QHBoxLayout()
+        
+        self.total_products_label = QLabel("إجمالي المنتجات: 0")
+        self.low_stock_label = QLabel("منتجات منخفضة: 0")
+        self.out_of_stock_label = QLabel("منتجات نفدت: 0")
+        self.inventory_value_label = QLabel("قيمة المخزون: 0.00 جنيه")
+        
+        inv_layout.addWidget(self.total_products_label)
+        inv_layout.addWidget(self.low_stock_label)
+        inv_layout.addWidget(self.out_of_stock_label)
+        inv_layout.addWidget(self.inventory_value_label)
+        inv_layout.addStretch()
+        
+        inv_group.setLayout(inv_layout)
         
         # Inventory table
-        self.inventory_report_table = QTableWidget()
-        layout.addWidget(self.inventory_report_table)
+        self.inventory_table = QTableWidget()
+        self.setup_inventory_table()
         
-        inventory_widget.setLayout(layout)
-        self.tab_widget.addTab(inventory_widget, "تقارير المخزون")
+        layout.addWidget(inv_group)
+        layout.addWidget(self.inventory_table)
         
-    def setup_repair_reports_tab(self):
-        """Setup repair reports tab"""
-        repair_widget = QWidget()
+        tab.setLayout(layout)
+        return tab
+    
+    def create_products_tab(self):
+        """Create top products tab"""
+        tab = QWidget()
         layout = QVBoxLayout()
         
-        # Filter controls
-        filter_layout = QHBoxLayout()
+        # Top products table
+        products_label = QLabel("أكثر المنتجات مبيعاً")
+        products_label.setFont(QFont("Noto Sans Arabic", 14, QFont.Weight.Bold))
         
-        self.repair_date_from = QDateEdit()
-        self.repair_date_from.setDate(QDate.currentDate().addDays(-30))
-        self.repair_date_from.setCalendarPopup(True)
+        self.products_table = QTableWidget()
+        self.setup_products_table()
         
-        self.repair_date_to = QDateEdit()
-        self.repair_date_to.setDate(QDate.currentDate())
-        self.repair_date_to.setCalendarPopup(True)
+        layout.addWidget(products_label)
+        layout.addWidget(self.products_table)
         
-        self.repair_status_filter = QComboBox()
-        self.repair_status_filter.addItem("جميع الحالات", None)
-        self.repair_status_filter.addItem("تم الاستلام", "received")
-        self.repair_status_filter.addItem("قيد الإصلاح", "in_progress")
-        self.repair_status_filter.addItem("تم الإصلاح", "completed")
-        self.repair_status_filter.addItem("تم التسليم", "delivered")
-        
-        self.generate_repair_report_btn = QPushButton("إنشاء التقرير")
-        self.export_repair_btn = QPushButton("تصدير Excel")
-        
-        filter_layout.addWidget(QLabel("من:"))
-        filter_layout.addWidget(self.repair_date_from)
-        filter_layout.addWidget(QLabel("إلى:"))
-        filter_layout.addWidget(self.repair_date_to)
-        filter_layout.addWidget(QLabel("الحالة:"))
-        filter_layout.addWidget(self.repair_status_filter)
-        filter_layout.addWidget(self.generate_repair_report_btn)
-        filter_layout.addWidget(self.export_repair_btn)
-        filter_layout.addStretch()
-        
-        layout.addLayout(filter_layout)
-        
-        # Repair table
-        self.repair_report_table = QTableWidget()
-        self.repair_report_table.setColumnCount(9)
-        self.repair_report_table.setHorizontalHeaderLabels([
-            "رقم التذكرة", "العميل", "الجهاز", "تاريخ الاستلام",
-            "تاريخ التسليم", "الحالة", "التكلفة", "الفني", "الأيام"
-        ])
-        
-        layout.addWidget(self.repair_report_table)
-        
-        repair_widget.setLayout(layout)
-        self.tab_widget.addTab(repair_widget, "تقارير الصيانة")
-        
-    def setup_transfer_reports_tab(self):
-        """Setup transfer reports tab"""
-        transfer_widget = QWidget()
+        tab.setLayout(layout)
+        return tab
+    
+    def create_charts_tab(self):
+        """Create charts tab"""
+        tab = QWidget()
         layout = QVBoxLayout()
         
-        # Filter controls
-        filter_layout = QHBoxLayout()
+        # Chart controls
+        controls_layout = QHBoxLayout()
         
-        self.transfer_date_from = QDateEdit()
-        self.transfer_date_from.setDate(QDate.currentDate().addDays(-30))
-        self.transfer_date_from.setCalendarPopup(True)
+        chart_label = QLabel("نوع المخطط:")
+        self.chart_type = QComboBox()
+        self.chart_type.addItems(["مبيعات يومية", "مبيعات شهرية", "أكثر المنتجات مبيعاً"])
+        self.chart_type.currentTextChanged.connect(self.update_chart)
         
-        self.transfer_date_to = QDateEdit()
-        self.transfer_date_to.setDate(QDate.currentDate())
-        self.transfer_date_to.setCalendarPopup(True)
+        controls_layout.addWidget(chart_label)
+        controls_layout.addWidget(self.chart_type)
+        controls_layout.addStretch()
         
-        self.transfer_type_filter = QComboBox()
-        self.transfer_type_filter.addItem("جميع الأنواع", None)
-        self.transfer_type_filter.addItem("فودافون كاش", "vodafone_cash")
-        self.transfer_type_filter.addItem("اتصالات كاش", "etisalat_cash")
-        self.transfer_type_filter.addItem("اورانج كاش", "orange_cash")
+        # Matplotlib canvas
+        self.figure = Figure(figsize=(12, 6))
+        self.canvas = FigureCanvas(self.figure)
         
-        self.generate_transfer_report_btn = QPushButton("إنشاء التقرير")
-        self.export_transfer_btn = QPushButton("تصدير Excel")
+        layout.addLayout(controls_layout)
+        layout.addWidget(self.canvas)
         
-        filter_layout.addWidget(QLabel("من:"))
-        filter_layout.addWidget(self.transfer_date_from)
-        filter_layout.addWidget(QLabel("إلى:"))
-        filter_layout.addWidget(self.transfer_date_to)
-        filter_layout.addWidget(QLabel("النوع:"))
-        filter_layout.addWidget(self.transfer_type_filter)
-        filter_layout.addWidget(self.generate_transfer_report_btn)
-        filter_layout.addWidget(self.export_transfer_btn)
-        filter_layout.addStretch()
+        tab.setLayout(layout)
+        return tab
+    
+    def setup_sales_table(self):
+        """Setup sales table"""
+        headers = ["رقم الفاتورة", "التاريخ", "العميل", "الإجمالي", "المدفوع", "الباقي"]
         
-        layout.addLayout(filter_layout)
+        self.sales_table.setColumnCount(len(headers))
+        self.sales_table.setHorizontalHeaderLabels(headers)
         
-        # Transfer summary
-        transfer_summary_layout = QHBoxLayout()
+        self.sales_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.sales_table.setAlternatingRowColors(True)
         
-        self.transfer_summary_labels = {
-            'total_amount': QLabel("إجمالي المبلغ: 0 ج.م"),
-            'total_commission': QLabel("إجمالي العمولة: 0 ج.م"),
-            'total_profit': QLabel("إجمالي الربح: 0 ج.م"),
-            'transaction_count': QLabel("عدد المعاملات: 0")
-        }
+        # Resize columns
+        header = self.sales_table.horizontalHeader()
+        header.setStretchLastSection(True)
+    
+    def setup_inventory_table(self):
+        """Setup inventory table"""
+        headers = ["اسم المنتج", "الكمية", "الحد الأدنى", "الحالة", "قيمة الكمية"]
         
-        for label in self.transfer_summary_labels.values():
-            label.setFont(QFont("Cairo", 11, QFont.Weight.Bold))
-            transfer_summary_layout.addWidget(label)
+        self.inventory_table.setColumnCount(len(headers))
+        self.inventory_table.setHorizontalHeaderLabels(headers)
         
-        layout.addLayout(transfer_summary_layout)
+        self.inventory_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.inventory_table.setAlternatingRowColors(True)
         
-        # Transfer table
-        self.transfer_report_table = QTableWidget()
-        self.transfer_report_table.setColumnCount(8)
-        self.transfer_report_table.setHorizontalHeaderLabels([
-            "رقم المعاملة", "نوع الخدمة", "المبلغ", "العمولة",
-            "الربح", "رقم الهاتف", "التاريخ", "المستخدم"
-        ])
+        # Resize columns
+        header = self.inventory_table.horizontalHeader()
+        header.setStretchLastSection(True)
+    
+    def setup_products_table(self):
+        """Setup top products table"""
+        headers = ["اسم المنتج", "الكمية المباعة", "إجمالي الإيرادات"]
         
-        layout.addWidget(self.transfer_report_table)
+        self.products_table.setColumnCount(len(headers))
+        self.products_table.setHorizontalHeaderLabels(headers)
         
-        transfer_widget.setLayout(layout)
-        self.tab_widget.addTab(transfer_widget, "تقارير التحويلات")
+        self.products_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.products_table.setAlternatingRowColors(True)
         
-    def setup_financial_reports_tab(self):
-        """Setup financial reports tab"""
-        financial_widget = QWidget()
-        layout = QVBoxLayout()
-        
-        # Report type selector
-        report_type_layout = QHBoxLayout()
-        
-        self.financial_report_type = QComboBox()
-        self.financial_report_type.addItem("تقرير الأرباح والخسائر", "profit_loss")
-        self.financial_report_type.addItem("تقرير الإيرادات", "revenue")
-        self.financial_report_type.addItem("تقرير التكاليف", "costs")
-        self.financial_report_type.addItem("تقرير شامل", "comprehensive")
-        
-        self.financial_date_from = QDateEdit()
-        self.financial_date_from.setDate(QDate.currentDate().addDays(-30))
-        self.financial_date_from.setCalendarPopup(True)
-        
-        self.financial_date_to = QDateEdit()
-        self.financial_date_to.setDate(QDate.currentDate())
-        self.financial_date_to.setCalendarPopup(True)
-        
-        self.generate_financial_report_btn = QPushButton("إنشاء التقرير")
-        self.export_financial_btn = QPushButton("تصدير Excel")
-        
-        report_type_layout.addWidget(QLabel("نوع التقرير:"))
-        report_type_layout.addWidget(self.financial_report_type)
-        report_type_layout.addWidget(QLabel("من:"))
-        report_type_layout.addWidget(self.financial_date_from)
-        report_type_layout.addWidget(QLabel("إلى:"))
-        report_type_layout.addWidget(self.financial_date_to)
-        report_type_layout.addWidget(self.generate_financial_report_btn)
-        report_type_layout.addWidget(self.export_financial_btn)
-        report_type_layout.addStretch()
-        
-        layout.addLayout(report_type_layout)
-        
-        # Financial summary
-        financial_summary_group = QGroupBox("الملخص المالي")
-        financial_summary_layout = QFormLayout()
-        
-        self.financial_summary_labels = {
-            'total_revenue': QLabel("0 ج.م"),
-            'total_costs': QLabel("0 ج.م"),
-            'gross_profit': QLabel("0 ج.م"),
-            'net_profit': QLabel("0 ج.م"),
-            'profit_margin': QLabel("0%")
-        }
-        
-        financial_summary_layout.addRow("إجمالي الإيرادات:", self.financial_summary_labels['total_revenue'])
-        financial_summary_layout.addRow("إجمالي التكاليف:", self.financial_summary_labels['total_costs'])
-        financial_summary_layout.addRow("إجمالي الربح:", self.financial_summary_labels['gross_profit'])
-        financial_summary_layout.addRow("صافي الربح:", self.financial_summary_labels['net_profit'])
-        financial_summary_layout.addRow("هامش الربح:", self.financial_summary_labels['profit_margin'])
-        
-        financial_summary_group.setLayout(financial_summary_layout)
-        layout.addWidget(financial_summary_group)
-        
-        # Financial chart
-        self.financial_chart = self.create_chart_widget()
-        layout.addWidget(self.financial_chart)
-        
-        financial_widget.setLayout(layout)
-        self.tab_widget.addTab(financial_widget, "التقارير المالية")
-        
-    def create_metric_card(self, title: str, value: str, color: str):
-        """Create a metric card widget"""
-        card = QFrame()
-        card.setFrameStyle(QFrame.Shape.StyledPanel)
-        card.setLineWidth(1)
-        card.setStyleSheet(f"""
-            QFrame {{
-                background-color: white;
-                border: 1px solid #dee2e6;
-                border-radius: 8px;
-                border-left: 4px solid {color};
-                padding: 15px;
-                margin: 5px;
-            }}
-        """)
-        
-        layout = QVBoxLayout()
-        
-        value_label = QLabel(value)
-        value_label.setFont(QFont("Cairo", 18, QFont.Weight.Bold))
-        value_label.setStyleSheet(f"color: {color};")
-        value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        
-        title_label = QLabel(title)
-        title_label.setFont(QFont("Cairo", 11))
-        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title_label.setStyleSheet("color: #6c757d;")
-        
-        layout.addWidget(value_label)
-        layout.addWidget(title_label)
-        card.setLayout(layout)
-        
-        # Store labels for updating
-        card.value_label = value_label
-        card.title_label = title_label
-        
-        return card
-        
-    def create_chart_widget(self):
-        """Create a matplotlib chart widget"""
-        figure = Figure(figsize=(8, 6))
-        canvas = FigureCanvas(figure)
-        canvas.figure = figure
-        return canvas
-        
-    def setup_connections(self):
-        """Setup signal connections"""
-        # Dashboard
-        self.refresh_dashboard_btn.clicked.connect(self.refresh_dashboard)
-        
-        # Sales reports
-        self.generate_sales_report_btn.clicked.connect(self.generate_sales_report)
-        self.export_sales_btn.clicked.connect(self.export_sales_report)
-        
-        # Inventory reports
-        self.generate_inventory_report_btn.clicked.connect(self.generate_inventory_report)
-        self.export_inventory_btn.clicked.connect(self.export_inventory_report)
-        
-        # Repair reports
-        self.generate_repair_report_btn.clicked.connect(self.generate_repair_report)
-        self.export_repair_btn.clicked.connect(self.export_repair_report)
-        
-        # Transfer reports
-        self.generate_transfer_report_btn.clicked.connect(self.generate_transfer_report)
-        self.export_transfer_btn.clicked.connect(self.export_transfer_report)
-        
-        # Financial reports
-        self.generate_financial_report_btn.clicked.connect(self.generate_financial_report)
-        self.export_financial_btn.clicked.connect(self.export_financial_report)
-        
-    def load_initial_data(self):
-        """Load initial data for reports"""
-        self.load_users_for_filters()
-        self.refresh_dashboard()
-        
-    def load_users_for_filters(self):
-        """Load users for filter dropdowns"""
+        # Resize columns
+        header = self.products_table.horizontalHeader()
+        header.setStretchLastSection(True)
+    
+    def apply_styles(self):
+        """Apply custom styles"""
+        self.setStyleSheet(get_stylesheet("light"))
+    
+    def setup_matplotlib(self):
+        """Setup matplotlib for Arabic support"""
+        plt.rcParams['font.family'] = ['DejaVu Sans']
+        plt.rcParams['axes.unicode_minus'] = False
+    
+    def refresh_reports(self):
+        """Refresh all reports with current date range"""
         try:
-            users = self.report_service.get_all_users()
+            from_date = self.from_date.date().toPython()
+            to_date = self.to_date.date().toPython()
             
-            for user in users:
-                self.sales_user_filter.addItem(user.name, user.id)
-                
-        except Exception as e:
-            logging.error(f"Error loading users for filters: {e}")
+            # Convert to datetime for database query
+            from_datetime = datetime.combine(from_date, datetime.min.time())
+            to_datetime = datetime.combine(to_date, datetime.max.time())
             
-    def refresh_dashboard(self):
-        """Refresh dashboard metrics and charts"""
-        try:
-            date_from = self.date_from.date().toPython()
-            date_to = self.date_to.date().toPython()
+            # Load sales report
+            self.load_sales_report(from_datetime, to_datetime)
             
-            # Get dashboard metrics
-            metrics = self.report_service.get_dashboard_metrics(date_from, date_to)
+            # Load profit report
+            self.load_profit_report(from_datetime, to_datetime)
             
-            # Update metric cards
-            self.today_sales_card.value_label.setText(format_currency(metrics.get('today_sales', 0)))
-            self.monthly_sales_card.value_label.setText(format_currency(metrics.get('monthly_sales', 0)))
-            self.profit_card.value_label.setText(format_currency(metrics.get('total_profit', 0)))
-            self.low_stock_card.value_label.setText(str(metrics.get('low_stock_count', 0)))
+            # Load inventory report
+            self.load_inventory_report()
             
-            # Update charts
-            self.update_sales_trend_chart(date_from, date_to)
-            self.update_top_products_chart(date_from, date_to)
+            # Load top products
+            self.load_top_products(from_datetime, to_datetime)
+            
+            # Update chart
+            self.update_chart()
             
         except Exception as e:
-            logging.error(f"Error refreshing dashboard: {e}")
-            show_error(self, f"خطأ في تحديث لوحة المعلومات:\n{str(e)}")
-            
-    def update_sales_trend_chart(self, date_from, date_to):
-        """Update sales trend chart"""
+            QMessageBox.critical(self, "خطأ", f"خطأ في تحديث التقارير: {str(e)}")
+    
+    def load_sales_report(self, from_date, to_date):
+        """Load sales report data"""
         try:
-            sales_data = self.report_service.get_sales_trend(date_from, date_to)
-            
-            # Clear previous chart
-            self.sales_chart.figure.clear()
-            ax = self.sales_chart.figure.add_subplot(111)
-            
-            if sales_data:
-                dates = [item['date'] for item in sales_data]
-                amounts = [item['total'] for item in sales_data]
-                
-                ax.plot(dates, amounts, marker='o', linewidth=2, markersize=6)
-                ax.set_title('اتجاه المبيعات اليومية', fontsize=12, fontweight='bold')
-                ax.set_xlabel('التاريخ')
-                ax.set_ylabel('المبيعات (ج.م)')
-                ax.grid(True, alpha=0.3)
-                
-                # Format dates on x-axis
-                ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d'))
-                ax.xaxis.set_major_locator(mdates.WeekdayLocator())
-                
-            else:
-                ax.text(0.5, 0.5, 'لا توجد بيانات', ha='center', va='center', transform=ax.transAxes)
-                
-            self.sales_chart.draw()
-            
-        except Exception as e:
-            logging.error(f"Error updating sales trend chart: {e}")
-            
-    def update_top_products_chart(self, date_from, date_to):
-        """Update top products chart"""
-        try:
-            products_data = self.report_service.get_top_selling_products(date_from, date_to, limit=10)
-            
-            # Clear previous chart
-            self.products_chart.figure.clear()
-            ax = self.products_chart.figure.add_subplot(111)
-            
-            if products_data:
-                products = [item['product_name'][:20] + '...' if len(item['product_name']) > 20 else item['product_name'] for item in products_data]
-                quantities = [item['total_quantity'] for item in products_data]
-                
-                bars = ax.barh(products, quantities)
-                ax.set_title('أكثر المنتجات مبيعاً', fontsize=12, fontweight='bold')
-                ax.set_xlabel('الكمية المباعة')
-                
-                # Color bars
-                for bar in bars:
-                    bar.set_color('#007bff')
-                    
-            else:
-                ax.text(0.5, 0.5, 'لا توجد بيانات', ha='center', va='center', transform=ax.transAxes)
-                
-            self.products_chart.draw()
-            
-        except Exception as e:
-            logging.error(f"Error updating top products chart: {e}")
-            
-    def generate_sales_report(self):
-        """Generate sales report"""
-        try:
-            date_from = self.sales_date_from.date().toPython()
-            date_to = self.sales_date_to.date().toPython()
-            user_id = self.sales_user_filter.currentData()
-            
-            # Get sales data
-            sales_data = self.report_service.get_sales_report(date_from, date_to, user_id)
-            
-            # Update table
-            self.sales_report_table.setRowCount(len(sales_data['sales']))
-            
-            for row, sale in enumerate(sales_data['sales']):
-                self.sales_report_table.setItem(row, 0, QTableWidgetItem(sale.invoice_no))
-                self.sales_report_table.setItem(row, 1, QTableWidgetItem(sale.created_at.strftime("%Y-%m-%d %H:%M")))
-                self.sales_report_table.setItem(row, 2, QTableWidgetItem(sale.customer.name if sale.customer else "عميل نقدي"))
-                self.sales_report_table.setItem(row, 3, QTableWidgetItem(format_currency(sale.total)))
-                self.sales_report_table.setItem(row, 4, QTableWidgetItem(format_currency(sale.discount_amount)))
-                self.sales_report_table.setItem(row, 5, QTableWidgetItem(format_currency(sale.tax_amount)))
-                self.sales_report_table.setItem(row, 6, QTableWidgetItem(sale.user.name))
-                self.sales_report_table.setItem(row, 7, QTableWidgetItem(format_currency(sale.profit)))
+            report_data = self.report_service.get_sales_report(from_date, to_date)
             
             # Update summary
-            summary = sales_data['summary']
-            self.sales_summary_labels['total_sales'].setText(f"إجمالي المبيعات: {format_currency(summary['total_sales'])}")
-            self.sales_summary_labels['total_invoices'].setText(f"عدد الفواتير: {summary['total_invoices']}")
-            self.sales_summary_labels['average_invoice'].setText(f"متوسط الفاتورة: {format_currency(summary['average_invoice'])}")
-            self.sales_summary_labels['total_profit'].setText(f"إجمالي الربح: {format_currency(summary['total_profit'])}")
+            self.total_sales_label.setText(f"إجمالي المبيعات: {report_data['total_sales']:.2f} جنيه")
+            self.total_transactions_label.setText(f"عدد المعاملات: {report_data['total_transactions']}")
+            self.average_transaction_label.setText(f"متوسط المعاملة: {report_data['average_transaction']:.2f} جنيه")
             
-            show_success(self, "تم إنشاء تقرير المبيعات بنجاح")
+            # Load sales table
+            sales = report_data['sales']
+            self.sales_table.setRowCount(len(sales))
+            
+            for row, sale in enumerate(sales):
+                items = [
+                    sale.invoice_no,
+                    sale.created_at.strftime("%Y-%m-%d %H:%M"),
+                    sale.customer.name if sale.customer else "عميل نقدي",
+                    f"{sale.total:.2f}",
+                    f"{sale.paid:.2f}",
+                    f"{sale.change:.2f}"
+                ]
+                
+                for col, item_text in enumerate(items):
+                    item = QTableWidgetItem(str(item_text))
+                    self.sales_table.setItem(row, col, item)
+                    
+        except Exception as e:
+            QMessageBox.critical(self, "خطأ", f"خطأ في تحميل تقرير المبيعات: {str(e)}")
+    
+    def load_profit_report(self, from_date, to_date):
+        """Load profit report data"""
+        try:
+            profit_data = self.report_service.get_profit_report(from_date, to_date)
+            
+            # Update labels
+            self.revenue_label.setText(f"الإيرادات: {profit_data['total_revenue']:.2f} جنيه")
+            self.cost_label.setText(f"التكلفة: {profit_data['total_cost']:.2f} جنيه")
+            self.profit_label.setText(f"الربح: {profit_data['profit']:.2f} جنيه")
+            self.margin_label.setText(f"هامش الربح: {profit_data['margin']:.2f}%")
+            
+            # Update details
+            details = f"""
+تفاصيل تقرير الأرباح:
+إجمالي الإيرادات: {profit_data['total_revenue']:.2f} جنيه
+إجمالي التكلفة: {profit_data['total_cost']:.2f} جنيه
+صافي الربح: {profit_data['profit']:.2f} جنيه
+هامش الربح: {profit_data['margin']:.2f}%
+
+هذا التقرير يعتمد على أسعار الشراء المسجلة في النظام.
+            """
+            self.profit_details.setText(details.strip())
             
         except Exception as e:
-            logging.error(f"Error generating sales report: {e}")
-            show_error(self, f"خطأ في إنشاء تقرير المبيعات:\n{str(e)}")
-            
-    def generate_inventory_report(self):
-        """Generate inventory report"""
+            QMessageBox.critical(self, "خطأ", f"خطأ في تحميل تقرير الأرباح: {str(e)}")
+    
+    def load_inventory_report(self):
+        """Load inventory report data"""
         try:
-            report_type = self.inventory_report_type.currentData()
+            inventory_data = self.report_service.get_inventory_report()
             
-            if report_type == "current_stock":
-                data = self.report_service.get_current_stock_report()
-                headers = ["SKU", "اسم المنتج", "الفئة", "الكمية الحالية", "سعر الشراء", "سعر البيع", "قيمة المخزون"]
-            elif report_type == "low_stock":
-                data = self.report_service.get_low_stock_report()
-                headers = ["SKU", "اسم المنتج", "الكمية الحالية", "الحد الأدنى", "الفئة"]
-            elif report_type == "top_selling":
-                data = self.report_service.get_top_selling_products_report()
-                headers = ["اسم المنتج", "الكمية المباعة", "إجمالي المبيعات", "متوسط السعر"]
-            else:
-                show_error(self, "نوع التقرير غير مدعوم")
+            # Update summary
+            self.total_products_label.setText(f"إجمالي المنتجات: {inventory_data['total_products']}")
+            self.low_stock_label.setText(f"منتجات منخفضة: {inventory_data['low_stock']}")
+            self.out_of_stock_label.setText(f"منتجات نفدت: {inventory_data['out_of_stock']}")
+            self.inventory_value_label.setText(f"قيمة المخزون: {inventory_data['total_value']:.2f} جنيه")
+            
+            # Load inventory table
+            products = inventory_data['products']
+            self.inventory_table.setRowCount(len(products))
+            
+            for row, product in enumerate(products):
+                # Determine stock status
+                if product.quantity <= 0:
+                    status = "نفد"
+                elif product.quantity <= product.min_quantity:
+                    status = "منخفض"
+                else:
+                    status = "متوفر"
+                
+                value = product.cost_price * product.quantity
+                
+                items = [
+                    product.name_ar,
+                    str(product.quantity),
+                    str(product.min_quantity),
+                    status,
+                    f"{value:.2f}"
+                ]
+                
+                for col, item_text in enumerate(items):
+                    item = QTableWidgetItem(str(item_text))
+                    
+                    # Color coding
+                    if col == 3:  # Status column
+                        if status == "نفد":
+                            item.setBackground(Qt.GlobalColor.red)
+                        elif status == "منخفض":
+                            item.setBackground(Qt.GlobalColor.yellow)
+                    
+                    self.inventory_table.setItem(row, col, item)
+                    
+        except Exception as e:
+            QMessageBox.critical(self, "خطأ", f"خطأ في تحميل تقرير المخزون: {str(e)}")
+    
+    def load_top_products(self, from_date, to_date):
+        """Load top selling products"""
+        try:
+            top_products = self.report_service.get_top_selling_products(10, from_date, to_date)
+            
+            self.products_table.setRowCount(len(top_products))
+            
+            for row, (name, total_sold, total_revenue) in enumerate(top_products):
+                items = [
+                    name,
+                    str(total_sold),
+                    f"{float(total_revenue):.2f}"
+                ]
+                
+                for col, item_text in enumerate(items):
+                    item = QTableWidgetItem(str(item_text))
+                    self.products_table.setItem(row, col, item)
+                    
+        except Exception as e:
+            QMessageBox.critical(self, "خطأ", f"خطأ في تحميل أكثر المنتجات مبيعاً: {str(e)}")
+    
+    def update_chart(self):
+        """Update chart based on selected type"""
+        try:
+            self.figure.clear()
+            ax = self.figure.add_subplot(111)
+            
+            chart_type = self.chart_type.currentText()
+            
+            if chart_type == "مبيعات يومية":
+                self.create_daily_sales_chart(ax)
+            elif chart_type == "مبيعات شهرية":
+                self.create_monthly_sales_chart(ax)
+            elif chart_type == "أكثر المنتجات مبيعاً":
+                self.create_top_products_chart(ax)
+            
+            self.canvas.draw()
+            
+        except Exception as e:
+            print(f"Error updating chart: {e}")
+    
+    def create_daily_sales_chart(self, ax):
+        """Create daily sales chart"""
+        try:
+            sales_data = self.report_service.get_daily_sales_chart_data(30)
+            
+            if not sales_data:
+                ax.text(0.5, 0.5, 'لا توجد بيانات', ha='center', va='center', transform=ax.transAxes)
                 return
             
-            # Update table
-            self.inventory_report_table.setColumnCount(len(headers))
-            self.inventory_report_table.setHorizontalHeaderLabels(headers)
-            self.inventory_report_table.setRowCount(len(data))
+            dates = [datetime.strptime(item['date'], '%Y-%m-%d') for item in sales_data]
+            totals = [item['total'] for item in sales_data]
             
-            for row, item in enumerate(data):
-                for col, value in enumerate(item):
-                    self.inventory_report_table.setItem(row, col, QTableWidgetItem(str(value)))
+            ax.plot(dates, totals, marker='o', linewidth=2, markersize=6)
+            ax.set_title('المبيعات اليومية')
+            ax.set_xlabel('التاريخ')
+            ax.set_ylabel('المبيعات (جنيه)')
+            ax.grid(True, alpha=0.3)
             
-            show_success(self, "تم إنشاء تقرير المخزون بنجاح")
-            
-        except Exception as e:
-            logging.error(f"Error generating inventory report: {e}")
-            show_error(self, f"خطأ في إنشاء تقرير المخزون:\n{str(e)}")
-            
-    def generate_repair_report(self):
-        """Generate repair report"""
-        try:
-            date_from = self.repair_date_from.date().toPython()
-            date_to = self.repair_date_to.date().toPython()
-            status = self.repair_status_filter.currentData()
-            
-            repairs_data = self.report_service.get_repair_report(date_from, date_to, status)
-            
-            self.repair_report_table.setRowCount(len(repairs_data))
-            
-            for row, repair in enumerate(repairs_data):
-                self.repair_report_table.setItem(row, 0, QTableWidgetItem(repair.ticket_no))
-                self.repair_report_table.setItem(row, 1, QTableWidgetItem(repair.customer.name))
-                self.repair_report_table.setItem(row, 2, QTableWidgetItem(repair.device_model))
-                self.repair_report_table.setItem(row, 3, QTableWidgetItem(repair.entry_date.strftime("%Y-%m-%d")))
-                delivery_date = repair.delivered_date.strftime("%Y-%m-%d") if repair.delivered_date else "-"
-                self.repair_report_table.setItem(row, 4, QTableWidgetItem(delivery_date))
-                self.repair_report_table.setItem(row, 5, QTableWidgetItem(repair.status))
-                total_cost = repair.parts_cost + repair.labor_cost
-                self.repair_report_table.setItem(row, 6, QTableWidgetItem(format_currency(total_cost)))
-                tech_name = repair.technician.name if repair.technician else "-"
-                self.repair_report_table.setItem(row, 7, QTableWidgetItem(tech_name))
-                self.repair_report_table.setItem(row, 8, QTableWidgetItem(str(repair.days_in_service)))
-            
-            show_success(self, "تم إنشاء تقرير الصيانة بنجاح")
+            # Format dates on x-axis
+            ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+            ax.xaxis.set_major_locator(mdates.WeekdayLocator())
+            self.figure.autofmt_xdate()
             
         except Exception as e:
-            logging.error(f"Error generating repair report: {e}")
-            show_error(self, f"خطأ في إنشاء تقرير الصيانة:\n{str(e)}")
-            
-    def generate_transfer_report(self):
-        """Generate transfer report"""
+            ax.text(0.5, 0.5, f'خطأ في عرض البيانات: {str(e)}', ha='center', va='center', transform=ax.transAxes)
+    
+    def create_monthly_sales_chart(self, ax):
+        """Create monthly sales chart"""
+        # This would require additional data aggregation
+        ax.text(0.5, 0.5, 'مخطط المبيعات الشهرية\n(قيد التطوير)', ha='center', va='center', transform=ax.transAxes)
+    
+    def create_top_products_chart(self, ax):
+        """Create top products chart"""
         try:
-            date_from = self.transfer_date_from.date().toPython()
-            date_to = self.transfer_date_to.date().toPython()
-            transfer_type = self.transfer_type_filter.currentData()
+            from_date = datetime.combine(self.from_date.date().toPython(), datetime.min.time())
+            to_date = datetime.combine(self.to_date.date().toPython(), datetime.max.time())
             
-            transfers_data = self.report_service.get_transfer_report(date_from, date_to, transfer_type)
+            top_products = self.report_service.get_top_selling_products(10, from_date, to_date)
             
-            self.transfer_report_table.setRowCount(len(transfers_data['transfers']))
-            
-            total_amount = 0
-            total_commission = 0
-            total_profit = 0
-            
-            for row, transfer in enumerate(transfers_data['transfers']):
-                total_amount += transfer.amount
-                total_commission += transfer.commission
-                total_profit += transfer.profit
-                
-                self.transfer_report_table.setItem(row, 0, QTableWidgetItem(transfer.transaction_id))
-                self.transfer_report_table.setItem(row, 1, QTableWidgetItem(transfer.service_type_ar))
-                self.transfer_report_table.setItem(row, 2, QTableWidgetItem(format_currency(transfer.amount)))
-                self.transfer_report_table.setItem(row, 3, QTableWidgetItem(format_currency(transfer.commission)))
-                self.transfer_report_table.setItem(row, 4, QTableWidgetItem(format_currency(transfer.profit)))
-                self.transfer_report_table.setItem(row, 5, QTableWidgetItem(transfer.customer_phone))
-                self.transfer_report_table.setItem(row, 6, QTableWidgetItem(transfer.processed_at.strftime("%Y-%m-%d %H:%M")))
-                self.transfer_report_table.setItem(row, 7, QTableWidgetItem(transfer.user.name))
-            
-            # Update summary
-            self.transfer_summary_labels['total_amount'].setText(f"إجمالي المبلغ: {format_currency(total_amount)}")
-            self.transfer_summary_labels['total_commission'].setText(f"إجمالي العمولة: {format_currency(total_commission)}")
-            self.transfer_summary_labels['total_profit'].setText(f"إجمالي الربح: {format_currency(total_profit)}")
-            self.transfer_summary_labels['transaction_count'].setText(f"عدد المعاملات: {len(transfers_data['transfers'])}")
-            
-            show_success(self, "تم إنشاء تقرير التحويلات بنجاح")
-            
-        except Exception as e:
-            logging.error(f"Error generating transfer report: {e}")
-            show_error(self, f"خطأ في إنشاء تقرير التحويلات:\n{str(e)}")
-            
-    def generate_financial_report(self):
-        """Generate financial report"""
-        try:
-            date_from = self.financial_date_from.date().toPython()
-            date_to = self.financial_date_to.date().toPython()
-            report_type = self.financial_report_type.currentData()
-            
-            financial_data = self.report_service.get_financial_report(date_from, date_to, report_type)
-            
-            # Update summary
-            summary = financial_data['summary']
-            self.financial_summary_labels['total_revenue'].setText(format_currency(summary['total_revenue']))
-            self.financial_summary_labels['total_costs'].setText(format_currency(summary['total_costs']))
-            self.financial_summary_labels['gross_profit'].setText(format_currency(summary['gross_profit']))
-            self.financial_summary_labels['net_profit'].setText(format_currency(summary['net_profit']))
-            self.financial_summary_labels['profit_margin'].setText(f"{summary['profit_margin']:.2f}%")
-            
-            # Update financial chart
-            self.update_financial_chart(financial_data['chart_data'])
-            
-            show_success(self, "تم إنشاء التقرير المالي بنجاح")
-            
-        except Exception as e:
-            logging.error(f"Error generating financial report: {e}")
-            show_error(self, f"خطأ في إنشاء التقرير المالي:\n{str(e)}")
-            
-    def update_financial_chart(self, chart_data):
-        """Update financial chart"""
-        try:
-            self.financial_chart.figure.clear()
-            ax = self.financial_chart.figure.add_subplot(111)
-            
-            if chart_data:
-                categories = list(chart_data.keys())
-                values = list(chart_data.values())
-                
-                bars = ax.bar(categories, values, color=['#28a745', '#dc3545', '#007bff'])
-                ax.set_title('التحليل المالي', fontsize=12, fontweight='bold')
-                ax.set_ylabel('المبلغ (ج.م)')
-                
-                # Add value labels on bars
-                for bar in bars:
-                    height = bar.get_height()
-                    ax.text(bar.get_x() + bar.get_width()/2., height,
-                           f'{height:.0f}', ha='center', va='bottom')
-                           
-            else:
+            if not top_products:
                 ax.text(0.5, 0.5, 'لا توجد بيانات', ha='center', va='center', transform=ax.transAxes)
-                
-            self.financial_chart.draw()
+                return
+            
+            names = [item[0][:20] + '...' if len(item[0]) > 20 else item[0] for item in top_products[:10]]
+            quantities = [int(item[1]) for item in top_products[:10]]
+            
+            bars = ax.bar(range(len(names)), quantities)
+            ax.set_title('أكثر المنتجات مبيعاً')
+            ax.set_xlabel('المنتجات')
+            ax.set_ylabel('الكمية المباعة')
+            ax.set_xticks(range(len(names)))
+            ax.set_xticklabels(names, rotation=45, ha='right')
+            
+            # Add value labels on bars
+            for i, bar in enumerate(bars):
+                height = bar.get_height()
+                ax.text(bar.get_x() + bar.get_width()/2., height + 0.1,
+                       f'{quantities[i]}', ha='center', va='bottom')
             
         except Exception as e:
-            logging.error(f"Error updating financial chart: {e}")
-            
-    # Export methods
-    def export_sales_report(self):
-        """Export sales report to Excel"""
+            ax.text(0.5, 0.5, f'خطأ في عرض البيانات: {str(e)}', ha='center', va='center', transform=ax.transAxes)
+    
+    def export_to_excel(self):
+        """Export reports to Excel"""
         try:
-            # Get current table data
-            data = []
-            headers = []
+            from_date = self.from_date.date().toPython()
+            to_date = self.to_date.date().toPython()
             
-            # Get headers
-            for col in range(self.sales_report_table.columnCount()):
-                headers.append(self.sales_report_table.horizontalHeaderItem(col).text())
+            filename = f"reports_{from_date.strftime('%Y%m%d')}_{to_date.strftime('%Y%m%d')}.xlsx"
             
-            # Get data
-            for row in range(self.sales_report_table.rowCount()):
-                row_data = []
-                for col in range(self.sales_report_table.columnCount()):
-                    item = self.sales_report_table.item(row, col)
-                    row_data.append(item.text() if item else "")
-                data.append(row_data)
+            # Get all report data
+            from_datetime = datetime.combine(from_date, datetime.min.time())
+            to_datetime = datetime.combine(to_date, datetime.max.time())
             
-            filename = f"sales_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-            export_to_excel(data, headers, filename)
-            show_success(self, f"تم تصدير التقرير إلى {filename}")
+            sales_report = self.report_service.get_sales_report(from_datetime, to_datetime)
+            profit_report = self.report_service.get_profit_report(from_datetime, to_datetime)
+            inventory_report = self.report_service.get_inventory_report()
+            top_products = self.report_service.get_top_selling_products(20, from_datetime, to_datetime)
+            
+            # Export to Excel
+            filepath = self.excel_exporter.export_reports(
+                filename, sales_report, profit_report, inventory_report, top_products
+            )
+            
+            QMessageBox.information(self, "نجح", f"تم تصدير التقارير إلى: {filepath}")
             
         except Exception as e:
-            logging.error(f"Error exporting sales report: {e}")
-            show_error(self, f"خطأ في تصدير التقرير:\n{str(e)}")
-            
-    def export_inventory_report(self):
-        """Export inventory report to Excel"""
-        show_error(self, "ميزة تصدير تقرير المخزون قيد التطوير")
-        
-    def export_repair_report(self):
-        """Export repair report to Excel"""
-        show_error(self, "ميزة تصدير تقرير الصيانة قيد التطوير")
-        
-    def export_transfer_report(self):
-        """Export transfer report to Excel"""
-        show_error(self, "ميزة تصدير تقرير التحويلات قيد التطوير")
-        
-    def export_financial_report(self):
-        """Export financial report to Excel"""
-        show_error(self, "ميزة تصدير التقرير المالي قيد التطوير")
+            QMessageBox.critical(self, "خطأ", f"خطأ في تصدير التقارير: {str(e)}")

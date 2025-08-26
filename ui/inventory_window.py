@@ -1,382 +1,543 @@
-# -*- coding: utf-8 -*-
-"""
-Inventory management window for Al-Hussiny Mobile Shop POS System
-"""
-
-from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-                            QLabel, QPushButton, QLineEdit, QComboBox, QSpinBox,
-                            QDoubleSpinBox, QTextEdit, QTableWidget, QTableWidgetItem,
-                            QHeaderView, QAbstractItemView, QMessageBox, QDialog,
-                            QFormLayout, QDialogButtonBox, QFrame, QCheckBox)
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtWidgets import (QMainWindow, QVBoxLayout, QHBoxLayout, QWidget, 
+                            QLabel, QPushButton, QTableWidget, QTableWidgetItem,
+                            QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox,
+                            QFormLayout, QDialog, QMessageBox, QGroupBox,
+                            QHeaderView, QAbstractItemView)
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QFont
-import logging
 
-from .base_window import BaseWindow
-from .widgets.data_table import DataTableWidget
-from .dialogs.product_dialog import ProductDialog
+from services.inventory_service import InventoryService
+from ui.styles import get_stylesheet
 
-logger = logging.getLogger(__name__)
-
-class InventoryWindow(BaseWindow):
+class InventoryWindow(QMainWindow):
     """Inventory management window"""
     
-    def __init__(self, db_manager, user_data):
-        super().__init__(db_manager, user_data)
-        self.setup_inventory()
-        self.refresh_data()
+    def __init__(self, current_user):
+        super().__init__()
+        self.current_user = current_user
+        self.inventory_service = InventoryService()
+        self.current_product = None
+        
+        self.setup_ui()
+        self.apply_styles()
+        self.load_data()
     
-    def setup_inventory(self):
-        """Setup inventory interface"""
-        self.set_title("إدارة المخزون - محل الحسيني")
-        self.setMinimumSize(1200, 800)
+    def setup_ui(self):
+        """Setup the user interface"""
+        self.setWindowTitle("إدارة المخزون")
+        self.setMinimumSize(1000, 700)
+        self.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
         
-        # Main layout
-        main_layout = QVBoxLayout(self.content_widget)
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
         
-        # Toolbar
-        self.setup_toolbar(main_layout)
+        main_layout = QVBoxLayout()
+        main_layout.setSpacing(15)
+        main_layout.setContentsMargins(20, 20, 20, 20)
         
-        # Filters
-        self.setup_filters(main_layout)
+        # Header
+        header_layout = QHBoxLayout()
         
-        # Products table
-        self.setup_products_table(main_layout)
-        
-        # Statistics panel
-        self.setup_statistics_panel(main_layout)
-    
-    def setup_toolbar(self, layout):
-        """Setup toolbar with action buttons"""
-        toolbar_frame = QFrame()
-        toolbar_frame.setFrameStyle(QFrame.Shape.StyledPanel)
-        toolbar_frame.setMaximumHeight(60)
-        
-        toolbar_layout = QHBoxLayout(toolbar_frame)
+        title_label = QLabel("إدارة المخزون")
+        title_label.setFont(QFont("Noto Sans Arabic", 18, QFont.Weight.Bold))
+        title_label.setObjectName("title-label")
         
         # Add product button
-        if self.has_permission("inventory"):
-            self.add_product_btn = QPushButton("إضافة منتج جديد")
-            self.add_product_btn.setStyleSheet("""
-                QPushButton {
-                    background-color: #28a745;
-                    color: white;
-                    border: none;
-                    padding: 8px 16px;
-                    border-radius: 4px;
-                    font-weight: bold;
-                }
-                QPushButton:hover {
-                    background-color: #218838;
-                }
-            """)
-            self.add_product_btn.clicked.connect(self.add_product)
-            toolbar_layout.addWidget(self.add_product_btn)
+        self.add_button = QPushButton("إضافة منتج جديد")
+        self.add_button.clicked.connect(self.add_product)
         
-        # Edit product button
-        if self.has_permission("inventory"):
-            self.edit_product_btn = QPushButton("تعديل المنتج")
-            self.edit_product_btn.setStyleSheet("""
-                QPushButton {
-                    background-color: #007bff;
-                    color: white;
-                    border: none;
-                    padding: 8px 16px;
-                    border-radius: 4px;
-                    font-weight: bold;
-                }
-                QPushButton:hover {
-                    background-color: #0056b3;
-                }
-            """)
-            self.edit_product_btn.clicked.connect(self.edit_product)
-            self.edit_product_btn.setEnabled(False)
-            toolbar_layout.addWidget(self.edit_product_btn)
+        header_layout.addWidget(title_label)
+        header_layout.addStretch()
+        header_layout.addWidget(self.add_button)
         
-        # Delete product button
-        if self.has_permission("inventory"):
-            self.delete_product_btn = QPushButton("حذف المنتج")
-            self.delete_product_btn.setStyleSheet("""
-                QPushButton {
-                    background-color: #dc3545;
-                    color: white;
-                    border: none;
-                    padding: 8px 16px;
-                    border-radius: 4px;
-                    font-weight: bold;
-                }
-                QPushButton:hover {
-                    background-color: #c82333;
-                }
-            """)
-            self.delete_product_btn.clicked.connect(self.delete_product)
-            self.delete_product_btn.setEnabled(False)
-            toolbar_layout.addWidget(self.delete_product_btn)
-        
-        toolbar_layout.addStretch()
-        
-        # Refresh button
-        self.refresh_btn = QPushButton("تحديث")
-        self.refresh_btn.clicked.connect(self.refresh_data)
-        toolbar_layout.addWidget(self.refresh_btn)
-        
-        layout.addWidget(toolbar_frame)
-    
-    def setup_filters(self, layout):
-        """Setup filter controls"""
-        filters_frame = QFrame()
-        filters_frame.setFrameStyle(QFrame.Shape.StyledPanel)
-        filters_frame.setMaximumHeight(80)
-        
-        filters_layout = QHBoxLayout(filters_frame)
+        # Search and filter section
+        filter_group = QGroupBox("البحث والفلترة")
+        filter_layout = QHBoxLayout()
         
         # Search box
-        search_label = QLabel("البحث:")
-        self.search_edit = QLineEdit()
-        self.search_edit.setPlaceholderText("بحث بالاسم أو كود المنتج أو الباركود...")
-        self.search_edit.textChanged.connect(self.filter_products)
+        search_label = QLabel("بحث:")
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("ابحث بالاسم، الكود، أو الباركود...")
+        self.search_input.textChanged.connect(self.filter_products)
         
         # Category filter
         category_label = QLabel("الفئة:")
-        self.category_combo = QComboBox()
-        self.category_combo.addItem("جميع الفئات", 0)
-        self.category_combo.currentTextChanged.connect(self.filter_products)
+        self.category_filter = QComboBox()
+        self.category_filter.currentTextChanged.connect(self.filter_products)
         
-        # Low stock filter
-        self.low_stock_check = QCheckBox("المنتجات المنخفضة فقط")
-        self.low_stock_check.stateChanged.connect(self.filter_products)
+        # Stock status filter
+        stock_label = QLabel("حالة المخزون:")
+        self.stock_filter = QComboBox()
+        self.stock_filter.addItems(["الكل", "متوفر", "منخفض", "نفد"])
+        self.stock_filter.currentTextChanged.connect(self.filter_products)
         
-        filters_layout.addWidget(search_label)
-        filters_layout.addWidget(self.search_edit)
-        filters_layout.addWidget(category_label)
-        filters_layout.addWidget(self.category_combo)
-        filters_layout.addWidget(self.low_stock_check)
-        filters_layout.addStretch()
+        filter_layout.addWidget(search_label)
+        filter_layout.addWidget(self.search_input)
+        filter_layout.addWidget(category_label)
+        filter_layout.addWidget(self.category_filter)
+        filter_layout.addWidget(stock_label)
+        filter_layout.addWidget(self.stock_filter)
+        filter_layout.addStretch()
         
-        layout.addWidget(filters_frame)
+        filter_group.setLayout(filter_layout)
+        
+        # Products table
+        self.products_table = QTableWidget()
+        self.setup_products_table()
+        
+        # Action buttons
+        buttons_layout = QHBoxLayout()
+        
+        self.edit_button = QPushButton("تعديل")
+        self.edit_button.clicked.connect(self.edit_product)
+        self.edit_button.setEnabled(False)
+        
+        self.delete_button = QPushButton("حذف")
+        self.delete_button.clicked.connect(self.delete_product)
+        self.delete_button.setEnabled(False)
+        
+        self.stock_button = QPushButton("حركة مخزون")
+        self.stock_button.clicked.connect(self.stock_movement)
+        self.stock_button.setEnabled(False)
+        
+        buttons_layout.addWidget(self.edit_button)
+        buttons_layout.addWidget(self.delete_button)
+        buttons_layout.addWidget(self.stock_button)
+        buttons_layout.addStretch()
+        
+        # Add layouts to main layout
+        main_layout.addLayout(header_layout)
+        main_layout.addWidget(filter_group)
+        main_layout.addWidget(self.products_table)
+        main_layout.addLayout(buttons_layout)
+        
+        central_widget.setLayout(main_layout)
+        
+        # Connect table selection
+        self.products_table.selectionModel().selectionChanged.connect(self.on_selection_changed)
     
-    def setup_products_table(self, layout):
+    def setup_products_table(self):
         """Setup products table"""
-        self.products_table = DataTableWidget()
-        self.products_table.setColumns([
-            "كود المنتج", "اسم المنتج", "الفئة", "الكمية", 
-            "الحد الأدنى", "سعر الشراء", "سعر البيع", "الربحية %", "الحالة"
-        ])
+        headers = ["الكود", "اسم المنتج", "الفئة", "سعر الشراء", "سعر البيع", 
+                  "الكمية", "الحد الأدنى", "المزود", "حالة المخزون"]
         
-        # Connect selection signal
-        self.products_table.itemSelectionChanged.connect(self.on_product_selection_changed)
-        self.products_table.itemDoubleClicked.connect(self.edit_product)
+        self.products_table.setColumnCount(len(headers))
+        self.products_table.setHorizontalHeaderLabels(headers)
         
-        layout.addWidget(self.products_table)
+        # Set table properties
+        self.products_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.products_table.setAlternatingRowColors(True)
+        self.products_table.setSortingEnabled(True)
+        
+        # Resize columns
+        header = self.products_table.horizontalHeader()
+        header.setStretchLastSection(True)
+        for i in range(len(headers)):
+            header.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
     
-    def setup_statistics_panel(self, layout):
-        """Setup statistics panel"""
-        stats_frame = QFrame()
-        stats_frame.setFrameStyle(QFrame.Shape.StyledPanel)
-        stats_frame.setMaximumHeight(80)
-        
-        stats_layout = QHBoxLayout(stats_frame)
-        
-        # Statistics labels
-        self.total_products_label = QLabel("إجمالي المنتجات: 0")
-        self.low_stock_label = QLabel("منتجات منخفضة: 0")
-        self.total_value_label = QLabel("قيمة المخزون: 0 ج.م")
-        self.out_of_stock_label = QLabel("منتجات نفدت: 0")
-        
-        stats_layout.addWidget(self.total_products_label)
-        stats_layout.addWidget(self.low_stock_label)
-        stats_layout.addWidget(self.total_value_label)
-        stats_layout.addWidget(self.out_of_stock_label)
-        stats_layout.addStretch()
-        
-        layout.addWidget(stats_frame)
+    def apply_styles(self):
+        """Apply custom styles"""
+        self.setStyleSheet(get_stylesheet("light"))
     
-    def refresh_data(self):
-        """Refresh inventory data"""
+    def load_data(self):
+        """Load products and categories data"""
         try:
-            session = self.db_manager.get_session()
-            
-            # Load categories
-            self.load_categories(session)
+            # Load categories for filter
+            categories = self.inventory_service.get_categories()
+            self.category_filter.clear()
+            self.category_filter.addItem("الكل")
+            for category in categories:
+                self.category_filter.addItem(category.name_ar)
             
             # Load products
-            self.load_products(session)
-            
-            # Update statistics
-            self.update_statistics(session)
-            
-            self.update_status("تم تحديث بيانات المخزون")
+            self.load_products()
             
         except Exception as e:
-            self.logger.error(f"خطأ في تحديث بيانات المخزون: {e}")
-            self.show_message(f"خطأ في تحديث البيانات: {str(e)}", "error")
-        finally:
-            if 'session' in locals():
-                session.close()
+            QMessageBox.critical(self, "خطأ", f"خطأ في تحميل البيانات: {str(e)}")
     
-    def load_categories(self, session):
-        """Load categories into combo box"""
-        from models import Category
-        
-        # Clear existing items (except "all categories")
-        while self.category_combo.count() > 1:
-            self.category_combo.removeItem(1)
-        
-        # Load categories
-        categories = session.query(Category).order_by(Category.name_ar).all()
-        for category in categories:
-            self.category_combo.addItem(category.name_ar, category.id)
-    
-    def load_products(self, session):
+    def load_products(self):
         """Load products into table"""
-        from models import Product
-        
-        # Get filter values
-        search_text = self.search_edit.text().strip()
-        category_id = self.category_combo.currentData()
-        low_stock_only = self.low_stock_check.isChecked()
-        
-        # Build query
-        query = session.query(Product).filter_by(active=True)
-        
-        if search_text:
-            query = query.filter(
-                (Product.name_ar.contains(search_text)) |
-                (Product.sku.contains(search_text)) |
-                (Product.barcode.contains(search_text))
-            )
-        
-        if category_id and category_id > 0:
-            query = query.filter_by(category_id=category_id)
-        
-        if low_stock_only:
-            query = query.filter(Product.quantity <= Product.min_quantity)
-        
-        # Get products
-        products = query.order_by(Product.name_ar).all()
-        
-        # Populate table
-        data = []
-        for product in products:
-            profit_margin = f"{product.profit_margin:.1f}%" if product.profit_margin else "0%"
+        try:
+            products = self.inventory_service.get_products()
             
-            # Determine status
-            if product.quantity == 0:
-                status = "نفد"
-            elif product.is_low_stock:
-                status = "منخفض"
-            else:
-                status = "متوفر"
+            self.products_table.setRowCount(len(products))
             
-            data.append([
-                product.sku,
-                product.name_ar,
-                product.category.name_ar if product.category else "",
-                str(product.quantity),
-                str(product.min_quantity),
-                f"{product.cost_price:.2f}",
-                f"{product.sale_price:.2f}",
-                profit_margin,
-                status
-            ])
-        
-        self.products_table.setData(data)
-        
-        # Store products for reference
-        self.current_products = products
-    
-    def update_statistics(self, session):
-        """Update statistics panel"""
-        from models import Product
-        
-        # Get all active products
-        products = session.query(Product).filter_by(active=True).all()
-        
-        total_products = len(products)
-        low_stock_count = sum(1 for p in products if p.is_low_stock)
-        out_of_stock_count = sum(1 for p in products if p.quantity == 0)
-        total_value = sum(p.quantity * p.sale_price for p in products)
-        
-        # Update labels
-        self.total_products_label.setText(f"إجمالي المنتجات: {total_products}")
-        self.low_stock_label.setText(f"منتجات منخفضة: {low_stock_count}")
-        self.total_value_label.setText(f"قيمة المخزون: {total_value:.2f} ج.م")
-        self.out_of_stock_label.setText(f"منتجات نفدت: {out_of_stock_count}")
+            for row, product in enumerate(products):
+                # Determine stock status
+                if product.quantity <= 0:
+                    stock_status = "نفد"
+                elif product.quantity <= product.min_quantity:
+                    stock_status = "منخفض"
+                else:
+                    stock_status = "متوفر"
+                
+                # Populate table cells
+                items = [
+                    product.sku,
+                    product.name_ar,
+                    product.category.name_ar if product.category else "",
+                    f"{product.cost_price:.2f}",
+                    f"{product.sale_price:.2f}",
+                    str(product.quantity),
+                    str(product.min_quantity),
+                    product.supplier.name if product.supplier else "",
+                    stock_status
+                ]
+                
+                for col, item_text in enumerate(items):
+                    item = QTableWidgetItem(str(item_text))
+                    item.setData(Qt.ItemDataRole.UserRole, product.id)
+                    
+                    # Color coding for stock status
+                    if col == 8:  # Stock status column
+                        if stock_status == "نفد":
+                            item.setBackground(Qt.GlobalColor.red)
+                        elif stock_status == "منخفض":
+                            item.setBackground(Qt.GlobalColor.yellow)
+                    
+                    self.products_table.setItem(row, col, item)
+            
+        except Exception as e:
+            QMessageBox.critical(self, "خطأ", f"خطأ في تحميل المنتجات: {str(e)}")
     
     def filter_products(self):
-        """Filter products based on current filter settings"""
-        self.refresh_data()
+        """Filter products based on search criteria"""
+        search_text = self.search_input.text().lower()
+        category = self.category_filter.currentText()
+        stock_status = self.stock_filter.currentText()
+        
+        for row in range(self.products_table.rowCount()):
+            show_row = True
+            
+            # Search filter
+            if search_text:
+                product_name = self.products_table.item(row, 1).text().lower()
+                product_sku = self.products_table.item(row, 0).text().lower()
+                if search_text not in product_name and search_text not in product_sku:
+                    show_row = False
+            
+            # Category filter
+            if category != "الكل" and show_row:
+                product_category = self.products_table.item(row, 2).text()
+                if category != product_category:
+                    show_row = False
+            
+            # Stock status filter
+            if stock_status != "الكل" and show_row:
+                product_stock_status = self.products_table.item(row, 8).text()
+                if stock_status != product_stock_status:
+                    show_row = False
+            
+            self.products_table.setRowHidden(row, not show_row)
     
-    def on_product_selection_changed(self):
-        """Handle product selection change"""
-        selected_rows = self.products_table.get_selected_rows()
+    def on_selection_changed(self):
+        """Handle table selection change"""
+        selected_rows = self.products_table.selectionModel().selectedRows()
         has_selection = len(selected_rows) > 0
         
-        if self.has_permission("inventory"):
-            self.edit_product_btn.setEnabled(has_selection)
-            self.delete_product_btn.setEnabled(has_selection)
+        self.edit_button.setEnabled(has_selection)
+        self.delete_button.setEnabled(has_selection)
+        self.stock_button.setEnabled(has_selection)
+        
+        if has_selection:
+            row = selected_rows[0].row()
+            product_id = self.products_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+            self.current_product = self.inventory_service.get_product_by_id(product_id)
     
     def add_product(self):
-        """Add new product"""
-        if not self.require_permission("inventory", "إضافة منتج جديد"):
-            return
-        
-        dialog = ProductDialog(self.db_manager, parent=self)
+        """Open dialog to add new product"""
+        dialog = ProductDialog(self, self.inventory_service)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            self.refresh_data()
-            self.log_action("add_product", "إضافة منتج جديد")
+            self.load_products()
     
     def edit_product(self):
-        """Edit selected product"""
-        if not self.require_permission("inventory", "تعديل المنتج"):
-            return
-        
-        selected_rows = self.products_table.get_selected_rows()
-        if not selected_rows:
-            self.show_message("يرجى اختيار منتج للتعديل", "warning")
-            return
-        
-        # Get selected product
-        row_index = selected_rows[0]
-        if hasattr(self, 'current_products') and row_index < len(self.current_products):
-            product = self.current_products[row_index]
-            
-            dialog = ProductDialog(self.db_manager, product, parent=self)
+        """Open dialog to edit selected product"""
+        if self.current_product:
+            dialog = ProductDialog(self, self.inventory_service, self.current_product)
             if dialog.exec() == QDialog.DialogCode.Accepted:
-                self.refresh_data()
-                self.log_action("edit_product", f"تعديل المنتج: {product.name_ar}")
+                self.load_products()
     
     def delete_product(self):
         """Delete selected product"""
-        if not self.require_permission("inventory", "حذف المنتج"):
+        if not self.current_product:
             return
         
-        selected_rows = self.products_table.get_selected_rows()
-        if not selected_rows:
-            self.show_message("يرجى اختيار منتج للحذف", "warning")
-            return
+        reply = QMessageBox.question(
+            self,
+            'تأكيد الحذف',
+            f'هل أنت متأكد من حذف المنتج "{self.current_product.name_ar}"؟',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
         
-        # Get selected product
-        row_index = selected_rows[0]
-        if hasattr(self, 'current_products') and row_index < len(self.current_products):
-            product = self.current_products[row_index]
+        if reply == QMessageBox.StandardButton.Yes:
+            try:
+                self.inventory_service.delete_product(self.current_product.id)
+                QMessageBox.information(self, "نجح", "تم حذف المنتج بنجاح")
+                self.load_products()
+            except Exception as e:
+                QMessageBox.critical(self, "خطأ", f"خطأ في حذف المنتج: {str(e)}")
+    
+    def stock_movement(self):
+        """Open stock movement dialog"""
+        if self.current_product:
+            dialog = StockMovementDialog(self, self.inventory_service, self.current_product, self.current_user)
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                self.load_products()
+
+class ProductDialog(QDialog):
+    """Dialog for adding/editing products"""
+    
+    def __init__(self, parent, inventory_service, product=None):
+        super().__init__(parent)
+        self.inventory_service = inventory_service
+        self.product = product
+        self.is_edit_mode = product is not None
+        
+        self.setup_ui()
+        if self.is_edit_mode:
+            self.load_product_data()
+    
+    def setup_ui(self):
+        """Setup dialog UI"""
+        title = "تعديل منتج" if self.is_edit_mode else "إضافة منتج جديد"
+        self.setWindowTitle(title)
+        self.setModal(True)
+        self.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+        self.resize(500, 600)
+        
+        layout = QVBoxLayout()
+        
+        # Form layout
+        form_layout = QFormLayout()
+        
+        # Product fields
+        self.sku_input = QLineEdit()
+        self.name_input = QLineEdit()
+        self.description_input = QLineEdit()
+        
+        self.category_combo = QComboBox()
+        self.supplier_combo = QComboBox()
+        
+        self.cost_price_input = QDoubleSpinBox()
+        self.cost_price_input.setMaximum(999999.99)
+        self.cost_price_input.setDecimals(2)
+        
+        self.sale_price_input = QDoubleSpinBox()
+        self.sale_price_input.setMaximum(999999.99)
+        self.sale_price_input.setDecimals(2)
+        
+        self.quantity_input = QSpinBox()
+        self.quantity_input.setMaximum(999999)
+        
+        self.min_quantity_input = QSpinBox()
+        self.min_quantity_input.setMaximum(999999)
+        self.min_quantity_input.setValue(5)
+        
+        self.barcode_input = QLineEdit()
+        
+        # Add fields to form
+        form_layout.addRow("كود المنتج (SKU):", self.sku_input)
+        form_layout.addRow("اسم المنتج:", self.name_input)
+        form_layout.addRow("الوصف:", self.description_input)
+        form_layout.addRow("الفئة:", self.category_combo)
+        form_layout.addRow("المزود:", self.supplier_combo)
+        form_layout.addRow("سعر الشراء:", self.cost_price_input)
+        form_layout.addRow("سعر البيع:", self.sale_price_input)
+        form_layout.addRow("الكمية:", self.quantity_input)
+        form_layout.addRow("الحد الأدنى:", self.min_quantity_input)
+        form_layout.addRow("الباركود:", self.barcode_input)
+        
+        # Buttons
+        buttons_layout = QHBoxLayout()
+        
+        self.save_button = QPushButton("حفظ")
+        self.save_button.clicked.connect(self.save_product)
+        
+        self.cancel_button = QPushButton("إلغاء")
+        self.cancel_button.clicked.connect(self.reject)
+        
+        buttons_layout.addWidget(self.save_button)
+        buttons_layout.addWidget(self.cancel_button)
+        
+        layout.addLayout(form_layout)
+        layout.addLayout(buttons_layout)
+        
+        self.setLayout(layout)
+        
+        # Load categories and suppliers
+        self.load_combos()
+    
+    def load_combos(self):
+        """Load categories and suppliers into combo boxes"""
+        try:
+            # Load categories
+            categories = self.inventory_service.get_categories()
+            self.category_combo.clear()
+            self.category_combo.addItem("اختر الفئة", None)
+            for category in categories:
+                self.category_combo.addItem(category.name_ar, category.id)
             
-            if self.show_question(f"هل تريد حذف المنتج '{product.name_ar}'؟"):
-                try:
-                    session = self.db_manager.get_session()
-                    
-                    # Soft delete
-                    product_obj = session.query(type(product)).get(product.id)
-                    product_obj.active = False
-                    session.commit()
-                    
-                    self.refresh_data()
-                    self.log_action("delete_product", f"حذف المنتج: {product.name_ar}")
-                    self.show_message("تم حذف المنتج بنجاح", "success")
-                    
-                except Exception as e:
-                    session.rollback()
-                    self.logger.error(f"خطأ في حذف المنتج: {e}")
-                    self.show_message(f"خطأ في حذف المنتج: {str(e)}", "error")
-                finally:
-                    session.close()
+            # Load suppliers
+            suppliers = self.inventory_service.get_suppliers()
+            self.supplier_combo.clear()
+            self.supplier_combo.addItem("اختر المزود", None)
+            for supplier in suppliers:
+                self.supplier_combo.addItem(supplier.name, supplier.id)
+                
+        except Exception as e:
+            QMessageBox.critical(self, "خطأ", f"خطأ في تحميل البيانات: {str(e)}")
+    
+    def load_product_data(self):
+        """Load existing product data for editing"""
+        if not self.product:
+            return
+        
+        self.sku_input.setText(self.product.sku)
+        self.name_input.setText(self.product.name_ar)
+        self.description_input.setText(self.product.description_ar or "")
+        self.cost_price_input.setValue(self.product.cost_price)
+        self.sale_price_input.setValue(self.product.sale_price)
+        self.quantity_input.setValue(self.product.quantity)
+        self.min_quantity_input.setValue(self.product.min_quantity)
+        self.barcode_input.setText(self.product.barcode or "")
+        
+        # Set category
+        if self.product.category_id:
+            for i in range(self.category_combo.count()):
+                if self.category_combo.itemData(i) == self.product.category_id:
+                    self.category_combo.setCurrentIndex(i)
+                    break
+        
+        # Set supplier
+        if self.product.supplier_id:
+            for i in range(self.supplier_combo.count()):
+                if self.supplier_combo.itemData(i) == self.product.supplier_id:
+                    self.supplier_combo.setCurrentIndex(i)
+                    break
+    
+    def save_product(self):
+        """Save product data"""
+        try:
+            # Validate required fields
+            if not self.sku_input.text().strip():
+                QMessageBox.warning(self, "تحذير", "يرجى إدخال كود المنتج")
+                return
+            
+            if not self.name_input.text().strip():
+                QMessageBox.warning(self, "تحذير", "يرجى إدخال اسم المنتج")
+                return
+            
+            if self.sale_price_input.value() <= 0:
+                QMessageBox.warning(self, "تحذير", "يرجى إدخال سعر بيع صحيح")
+                return
+            
+            # Prepare product data
+            product_data = {
+                'sku': self.sku_input.text().strip(),
+                'name_ar': self.name_input.text().strip(),
+                'description_ar': self.description_input.text().strip(),
+                'category_id': self.category_combo.currentData(),
+                'supplier_id': self.supplier_combo.currentData(),
+                'cost_price': self.cost_price_input.value(),
+                'sale_price': self.sale_price_input.value(),
+                'quantity': self.quantity_input.value(),
+                'min_quantity': self.min_quantity_input.value(),
+                'barcode': self.barcode_input.text().strip() or None
+            }
+            
+            # Save product
+            if self.is_edit_mode:
+                self.inventory_service.update_product(self.product.id, product_data)
+                QMessageBox.information(self, "نجح", "تم تحديث المنتج بنجاح")
+            else:
+                self.inventory_service.create_product(product_data)
+                QMessageBox.information(self, "نجح", "تم إضافة المنتج بنجاح")
+            
+            self.accept()
+            
+        except Exception as e:
+            QMessageBox.critical(self, "خطأ", f"خطأ في حفظ المنتج: {str(e)}")
+
+class StockMovementDialog(QDialog):
+    """Dialog for stock movements"""
+    
+    def __init__(self, parent, inventory_service, product, current_user):
+        super().__init__(parent)
+        self.inventory_service = inventory_service
+        self.product = product
+        self.current_user = current_user
+        
+        self.setup_ui()
+    
+    def setup_ui(self):
+        """Setup dialog UI"""
+        self.setWindowTitle(f"حركة مخزون - {self.product.name_ar}")
+        self.setModal(True)
+        self.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+        self.resize(400, 300)
+        
+        layout = QVBoxLayout()
+        
+        # Product info
+        info_label = QLabel(f"المنتج: {self.product.name_ar}\nالكمية الحالية: {self.product.quantity}")
+        info_label.setFont(QFont("Noto Sans Arabic", 11, QFont.Weight.Bold))
+        
+        # Form
+        form_layout = QFormLayout()
+        
+        self.movement_type = QComboBox()
+        self.movement_type.addItems(["شراء", "بيع", "تعديل", "تحويل", "مرتجع"])
+        
+        self.quantity_input = QSpinBox()
+        self.quantity_input.setMinimum(-999999)
+        self.quantity_input.setMaximum(999999)
+        
+        self.reference_input = QLineEdit()
+        self.note_input = QLineEdit()
+        
+        form_layout.addRow("نوع الحركة:", self.movement_type)
+        form_layout.addRow("الكمية:", self.quantity_input)
+        form_layout.addRow("المرجع:", self.reference_input)
+        form_layout.addRow("ملاحظة:", self.note_input)
+        
+        # Buttons
+        buttons_layout = QHBoxLayout()
+        
+        save_button = QPushButton("حفظ")
+        save_button.clicked.connect(self.save_movement)
+        
+        cancel_button = QPushButton("إلغاء")
+        cancel_button.clicked.connect(self.reject)
+        
+        buttons_layout.addWidget(save_button)
+        buttons_layout.addWidget(cancel_button)
+        
+        layout.addWidget(info_label)
+        layout.addLayout(form_layout)
+        layout.addLayout(buttons_layout)
+        
+        self.setLayout(layout)
+    
+    def save_movement(self):
+        """Save stock movement"""
+        try:
+            if self.quantity_input.value() == 0:
+                QMessageBox.warning(self, "تحذير", "يرجى إدخال كمية صحيحة")
+                return
+            
+            movement_data = {
+                'product_id': self.product.id,
+                'change_qty': self.quantity_input.value(),
+                'movement_type': self.movement_type.currentText(),
+                'reference_id': self.reference_input.text().strip() or None,
+                'note': self.note_input.text().strip() or None,
+                'user_id': self.current_user.id
+            }
+            
+            self.inventory_service.create_stock_movement(movement_data)
+            QMessageBox.information(self, "نجح", "تم تسجيل حركة المخزون بنجاح")
+            self.accept()
+            
+        except Exception as e:
+            QMessageBox.critical(self, "خطأ", f"خطأ في تسجيل الحركة: {str(e)}")

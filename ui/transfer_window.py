@@ -1,680 +1,596 @@
-# -*- coding: utf-8 -*-
-"""
-Balance transfer management window
-"""
-
-import logging
-from datetime import datetime
-from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-                            QTableWidget, QTableWidgetItem, QPushButton, QLabel,
+from PyQt6.QtWidgets import (QMainWindow, QVBoxLayout, QHBoxLayout, QWidget, 
+                            QLabel, QPushButton, QTableWidget, QTableWidgetItem,
                             QLineEdit, QComboBox, QDoubleSpinBox, QTextEdit,
-                            QMessageBox, QHeaderView, QFrame, QGroupBox,
-                            QFormLayout, QTabWidget, QCheckBox)
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QFont, QColor
+                            QFormLayout, QDialog, QMessageBox, QGroupBox,
+                            QHeaderView, QAbstractItemView, QDateEdit)
+from PyQt6.QtCore import Qt, QDate
+from PyQt6.QtGui import QFont
+from datetime import datetime
 
-from models.user import User
-from models.transfer import Transfer
-from config.database import get_db_session
-from services.report_service import ReportService
-from utils.helpers import format_currency, show_error, show_success, generate_transaction_id
+from services.transfer_service import TransferService
+from ui.styles import get_stylesheet
 
 class TransferWindow(QMainWindow):
-    """Balance transfer management window"""
+    """Balance transfer and cash transactions window"""
     
-    def __init__(self, user: User):
+    def __init__(self, current_user):
         super().__init__()
-        self.current_user = user
-        self.transfers_data = []
-        self.report_service = ReportService()
+        self.current_user = current_user
+        self.transfer_service = TransferService()
+        self.current_transfer = None
         
         self.setup_ui()
-        self.setup_connections()
+        self.apply_styles()
         self.load_data()
-        
+    
     def setup_ui(self):
-        """Setup user interface"""
-        self.setWindowTitle("تحويلات الرصيد")
-        self.setMinimumSize(1400, 900)
+        """Setup the user interface"""
+        self.setWindowTitle("تحويلات الرصيد والمعاملات النقدية")
+        self.setMinimumSize(1000, 700)
+        self.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
         
-        # Central widget
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         
-        # Main layout
         main_layout = QVBoxLayout()
-        central_widget.setLayout(main_layout)
+        main_layout.setSpacing(15)
+        main_layout.setContentsMargins(20, 20, 20, 20)
         
-        # Create tab widget
-        self.tab_widget = QTabWidget()
-        main_layout.addWidget(self.tab_widget)
+        # Header
+        header_layout = QHBoxLayout()
         
-        # Transfers list tab
-        self.setup_transfers_tab()
+        title_label = QLabel("إدارة تحويلات الرصيد")
+        title_label.setFont(QFont("Noto Sans Arabic", 18, QFont.Weight.Bold))
+        title_label.setObjectName("title-label")
         
-        # New transfer tab
-        self.setup_new_transfer_tab()
+        # Add new transfer button
+        self.add_transfer_btn = QPushButton("معاملة جديدة")
+        self.add_transfer_btn.clicked.connect(self.add_transfer)
         
-        # Statistics tab
-        self.setup_statistics_tab()
+        header_layout.addWidget(title_label)
+        header_layout.addStretch()
+        header_layout.addWidget(self.add_transfer_btn)
         
-    def setup_transfers_tab(self):
-        """Setup transfers list tab"""
-        transfers_widget = QWidget()
-        layout = QVBoxLayout()
+        # Search and filter section
+        filter_group = QGroupBox("البحث والفلترة")
+        filter_layout = QHBoxLayout()
         
-        # Toolbar
-        toolbar_layout = QHBoxLayout()
-        
-        # Search and filter controls
-        search_label = QLabel("البحث:")
+        # Search box
+        search_label = QLabel("بحث:")
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("البحث في رقم المعاملة، رقم الهاتف...")
+        self.search_input.setPlaceholderText("ابحث برقم المرجع، رقم الحساب، أو الملاحظات...")
+        self.search_input.textChanged.connect(self.filter_transfers)
         
-        type_label = QLabel("نوع الخدمة:")
+        # Type filter
+        type_label = QLabel("نوع المعاملة:")
         self.type_filter = QComboBox()
-        self.type_filter.addItem("جميع الأنواع", None)
-        self.type_filter.addItem("فودافون كاش", "vodafone_cash")
-        self.type_filter.addItem("اتصالات كاش", "etisalat_cash")
-        self.type_filter.addItem("اورانج كاش", "orange_cash")
-        self.type_filter.addItem("امان كاش", "aman_cash")
-        self.type_filter.addItem("شحن كروت", "card_charge")
-        self.type_filter.addItem("تحويل أموال", "money_transfer")
-        self.type_filter.addItem("أخرى", "other")
+        self.type_filter.addItems(["الكل", "فودافون كاش", "اتصالات كاش", "اورانج كاش", 
+                                  "اكسس كاش", "كروت فكّ", "تحويل بنكي", "أخرى"])
+        self.type_filter.currentTextChanged.connect(self.filter_transfers)
         
-        status_label = QLabel("الحالة:")
-        self.status_filter = QComboBox()
-        self.status_filter.addItem("جميع الحالات", None)
-        self.status_filter.addItem("معلقة", "pending")
-        self.status_filter.addItem("مكتملة", "completed")
-        self.status_filter.addItem("فاشلة", "failed")
-        self.status_filter.addItem("ملغاة", "cancelled")
+        # Date range
+        date_label = QLabel("من تاريخ:")
+        self.from_date = QDateEdit()
+        self.from_date.setDate(QDate.currentDate().addDays(-30))
+        self.from_date.setCalendarPopup(True)
+        self.from_date.dateChanged.connect(self.filter_transfers)
         
-        # Action buttons
-        self.new_transfer_btn = QPushButton("معاملة جديدة")
-        self.edit_transfer_btn = QPushButton("تعديل المعاملة")
-        self.verify_transfer_btn = QPushButton("تأكيد المعاملة")
-        self.print_receipt_btn = QPushButton("طباعة إيصال")
+        to_date_label = QLabel("إلى تاريخ:")
+        self.to_date = QDateEdit()
+        self.to_date.setDate(QDate.currentDate())
+        self.to_date.setCalendarPopup(True)
+        self.to_date.dateChanged.connect(self.filter_transfers)
         
-        # Enable/disable based on permissions
-        if not self.current_user.has_permission("transfers", "create"):
-            self.new_transfer_btn.setEnabled(False)
-        if not self.current_user.has_permission("transfers", "update"):
-            self.edit_transfer_btn.setEnabled(False)
-            self.verify_transfer_btn.setEnabled(False)
+        filter_layout.addWidget(search_label)
+        filter_layout.addWidget(self.search_input)
+        filter_layout.addWidget(type_label)
+        filter_layout.addWidget(self.type_filter)
+        filter_layout.addWidget(date_label)
+        filter_layout.addWidget(self.from_date)
+        filter_layout.addWidget(to_date_label)
+        filter_layout.addWidget(self.to_date)
         
-        toolbar_layout.addWidget(search_label)
-        toolbar_layout.addWidget(self.search_input)
-        toolbar_layout.addWidget(type_label)
-        toolbar_layout.addWidget(self.type_filter)
-        toolbar_layout.addWidget(status_label)
-        toolbar_layout.addWidget(self.status_filter)
-        toolbar_layout.addStretch()
-        toolbar_layout.addWidget(self.new_transfer_btn)
-        toolbar_layout.addWidget(self.edit_transfer_btn)
-        toolbar_layout.addWidget(self.verify_transfer_btn)
-        toolbar_layout.addWidget(self.print_receipt_btn)
-        
-        layout.addLayout(toolbar_layout)
+        filter_group.setLayout(filter_layout)
         
         # Transfers table
         self.transfers_table = QTableWidget()
-        self.transfers_table.setColumnCount(12)
-        self.transfers_table.setHorizontalHeaderLabels([
-            "رقم المعاملة", "نوع الخدمة", "المبلغ", "العمولة", "صافي المبلغ",
-            "اسم العميل", "رقم الهاتف", "الحالة", "تاريخ المعاملة", "المشغل",
-            "رقم المرجع", "الربح"
-        ])
+        self.setup_transfers_table()
         
-        # Configure table
-        header = self.transfers_table.horizontalHeader()
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
+        # Summary section
+        summary_group = QGroupBox("ملخص المعاملات")
+        summary_layout = QHBoxLayout()
         
-        self.transfers_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.total_amount_label = QLabel("إجمالي المبلغ: 0.00 جنيه")
+        self.total_amount_label.setFont(QFont("Noto Sans Arabic", 12, QFont.Weight.Bold))
+        
+        self.transaction_count_label = QLabel("عدد المعاملات: 0")
+        self.transaction_count_label.setFont(QFont("Noto Sans Arabic", 12, QFont.Weight.Bold))
+        
+        summary_layout.addWidget(self.total_amount_label)
+        summary_layout.addStretch()
+        summary_layout.addWidget(self.transaction_count_label)
+        
+        summary_group.setLayout(summary_layout)
+        
+        # Action buttons
+        buttons_layout = QHBoxLayout()
+        
+        self.view_btn = QPushButton("عرض التفاصيل")
+        self.view_btn.clicked.connect(self.view_transfer)
+        self.view_btn.setEnabled(False)
+        
+        self.edit_btn = QPushButton("تعديل")
+        self.edit_btn.clicked.connect(self.edit_transfer)
+        self.edit_btn.setEnabled(False)
+        
+        self.delete_btn = QPushButton("حذف")
+        self.delete_btn.clicked.connect(self.delete_transfer)
+        self.delete_btn.setEnabled(False)
+        
+        buttons_layout.addWidget(self.view_btn)
+        buttons_layout.addWidget(self.edit_btn)
+        buttons_layout.addWidget(self.delete_btn)
+        buttons_layout.addStretch()
+        
+        # Add layouts to main layout
+        main_layout.addLayout(header_layout)
+        main_layout.addWidget(filter_group)
+        main_layout.addWidget(self.transfers_table)
+        main_layout.addWidget(summary_group)
+        main_layout.addLayout(buttons_layout)
+        
+        central_widget.setLayout(main_layout)
+        
+        # Connect table selection
+        self.transfers_table.selectionModel().selectionChanged.connect(self.on_selection_changed)
+    
+    def setup_transfers_table(self):
+        """Setup transfers table"""
+        headers = ["التاريخ", "نوع المعاملة", "المبلغ", "من حساب", "إلى حساب", "رقم المرجع", "الحالة", "ملاحظات"]
+        
+        self.transfers_table.setColumnCount(len(headers))
+        self.transfers_table.setHorizontalHeaderLabels(headers)
+        
+        self.transfers_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.transfers_table.setAlternatingRowColors(True)
         self.transfers_table.setSortingEnabled(True)
         
-        layout.addWidget(self.transfers_table)
+        # Resize columns
+        header = self.transfers_table.horizontalHeader()
+        header.setStretchLastSection(True)
+    
+    def apply_styles(self):
+        """Apply custom styles"""
+        self.setStyleSheet(get_stylesheet("light"))
+    
+    def load_data(self):
+        """Load transfers data"""
+        try:
+            self.load_transfers()
+        except Exception as e:
+            QMessageBox.critical(self, "خطأ", f"خطأ في تحميل البيانات: {str(e)}")
+    
+    def load_transfers(self):
+        """Load transfers into table"""
+        try:
+            # Get date range
+            from_date = self.from_date.date().toPython()
+            to_date = self.to_date.date().toPython()
+            
+            transfers = self.transfer_service.get_transfers(from_date, to_date)
+            
+            self.transfers_table.setRowCount(len(transfers))
+            
+            total_amount = 0
+            
+            for row, transfer in enumerate(transfers):
+                # Format date
+                transfer_date = transfer.date.strftime("%Y-%m-%d %H:%M") if transfer.date else ""
+                
+                items = [
+                    transfer_date,
+                    transfer.transfer_type,
+                    f"{transfer.amount:.2f}",
+                    transfer.from_account or "",
+                    transfer.to_account,
+                    transfer.reference_no or "",
+                    transfer.status,
+                    transfer.note[:30] + "..." if transfer.note and len(transfer.note) > 30 else transfer.note or ""
+                ]
+                
+                for col, item_text in enumerate(items):
+                    item = QTableWidgetItem(str(item_text))
+                    item.setData(Qt.ItemDataRole.UserRole, transfer.id)
+                    
+                    # Color coding for status
+                    if col == 6:  # Status column
+                        if transfer.status == "completed":
+                            item.setBackground(Qt.GlobalColor.green)
+                        elif transfer.status == "pending":
+                            item.setBackground(Qt.GlobalColor.yellow)
+                        elif transfer.status == "failed":
+                            item.setBackground(Qt.GlobalColor.red)
+                    
+                    self.transfers_table.setItem(row, col, item)
+                
+                total_amount += transfer.amount
+            
+            # Update summary
+            self.total_amount_label.setText(f"إجمالي المبلغ: {total_amount:.2f} جنيه")
+            self.transaction_count_label.setText(f"عدد المعاملات: {len(transfers)}")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "خطأ", f"خطأ في تحميل المعاملات: {str(e)}")
+    
+    def filter_transfers(self):
+        """Filter transfers and reload data"""
+        self.load_transfers()
+    
+    def on_selection_changed(self):
+        """Handle table selection change"""
+        selected_rows = self.transfers_table.selectionModel().selectedRows()
+        has_selection = len(selected_rows) > 0
         
-        # Status bar
-        status_layout = QHBoxLayout()
-        self.total_transfers_label = QLabel("إجمالي المعاملات: 0")
-        self.total_amount_label = QLabel("إجمالي المبلغ: 0 ج.م")
-        self.total_profit_label = QLabel("إجمالي الربح: 0 ج.م")
-        self.pending_count_label = QLabel("معاملات معلقة: 0")
+        self.view_btn.setEnabled(has_selection)
+        self.edit_btn.setEnabled(has_selection)
+        self.delete_btn.setEnabled(has_selection)
         
-        status_layout.addWidget(self.total_transfers_label)
-        status_layout.addWidget(self.total_amount_label)
-        status_layout.addWidget(self.total_profit_label)
-        status_layout.addWidget(self.pending_count_label)
-        status_layout.addStretch()
+        if has_selection:
+            row = selected_rows[0].row()
+            transfer_id = self.transfers_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+            self.current_transfer = self.transfer_service.get_transfer_by_id(transfer_id)
+    
+    def add_transfer(self):
+        """Add new transfer"""
+        dialog = TransferDialog(self, self.transfer_service)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.load_transfers()
+    
+    def view_transfer(self):
+        """View transfer details"""
+        if self.current_transfer:
+            dialog = TransferViewDialog(self, self.current_transfer)
+            dialog.exec()
+    
+    def edit_transfer(self):
+        """Edit selected transfer"""
+        if self.current_transfer:
+            dialog = TransferDialog(self, self.transfer_service, self.current_transfer)
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                self.load_transfers()
+    
+    def delete_transfer(self):
+        """Delete selected transfer"""
+        if not self.current_transfer:
+            return
         
-        layout.addLayout(status_layout)
+        reply = QMessageBox.question(
+            self,
+            'تأكيد الحذف',
+            f'هل أنت متأكد من حذف المعاملة رقم "{self.current_transfer.reference_no}"؟',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
         
-        transfers_widget.setLayout(layout)
-        self.tab_widget.addTab(transfers_widget, "قائمة التحويلات")
+        if reply == QMessageBox.StandardButton.Yes:
+            try:
+                self.transfer_service.delete_transfer(self.current_transfer.id)
+                QMessageBox.information(self, "نجح", "تم حذف المعاملة بنجاح")
+                self.load_transfers()
+            except Exception as e:
+                QMessageBox.critical(self, "خطأ", f"خطأ في حذف المعاملة: {str(e)}")
+
+class TransferDialog(QDialog):
+    """Dialog for adding/editing transfers"""
+    
+    def __init__(self, parent, transfer_service, transfer=None):
+        super().__init__(parent)
+        self.transfer_service = transfer_service
+        self.transfer = transfer
+        self.is_edit_mode = transfer is not None
         
-    def setup_new_transfer_tab(self):
-        """Setup new transfer entry tab"""
-        new_transfer_widget = QWidget()
+        self.setup_ui()
+        if self.is_edit_mode:
+            self.load_transfer_data()
+    
+    def setup_ui(self):
+        """Setup dialog UI"""
+        title = "تعديل المعاملة" if self.is_edit_mode else "معاملة جديدة"
+        self.setWindowTitle(title)
+        self.setModal(True)
+        self.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+        self.resize(500, 400)
+        
         layout = QVBoxLayout()
         
-        # Service type section
-        service_group = QGroupBox("نوع الخدمة")
-        service_layout = QFormLayout()
+        # Form layout
+        form_layout = QFormLayout()
         
-        self.service_type_combo = QComboBox()
-        self.service_type_combo.addItem("فودافون كاش", "vodafone_cash")
-        self.service_type_combo.addItem("اتصالات كاش", "etisalat_cash")
-        self.service_type_combo.addItem("اورانج كاش", "orange_cash")
-        self.service_type_combo.addItem("امان كاش", "aman_cash")
-        self.service_type_combo.addItem("شحن كروت", "card_charge")
-        self.service_type_combo.addItem("تحويل أموال", "money_transfer")
-        self.service_type_combo.addItem("أخرى", "other")
-        
-        self.service_name_input = QLineEdit()
-        self.service_name_input.setPlaceholderText("اسم الخدمة التفصيلي...")
-        
-        service_layout.addRow("نوع الخدمة:", self.service_type_combo)
-        service_layout.addRow("اسم الخدمة:", self.service_name_input)
-        
-        service_group.setLayout(service_layout)
-        layout.addWidget(service_group)
-        
-        # Transaction details section
-        transaction_group = QGroupBox("تفاصيل المعاملة")
-        transaction_layout = QFormLayout()
-        
-        # Transaction ID
-        self.transaction_id_input = QLineEdit()
-        self.transaction_id_input.setReadOnly(True)
+        # Transfer type
+        self.type_combo = QComboBox()
+        self.type_combo.addItems(["فودافون كاش", "اتصالات كاش", "اورانج كاش", 
+                                 "اكسس كاش", "كروت فكّ", "تحويل بنكي", "أخرى"])
         
         # Amount
         self.amount_input = QDoubleSpinBox()
-        self.amount_input.setMaximum(999999)
+        self.amount_input.setMaximum(999999999.99)
         self.amount_input.setDecimals(2)
-        self.amount_input.setSuffix(" ج.م")
+        self.amount_input.setMinimum(0.01)
         
-        # Commission
-        self.commission_input = QDoubleSpinBox()
-        self.commission_input.setMaximum(999999)
-        self.commission_input.setDecimals(2)
-        self.commission_input.setSuffix(" ج.م")
+        # Accounts
+        self.from_account_input = QLineEdit()
+        self.to_account_input = QLineEdit()
         
-        # Net amount (calculated)
-        self.net_amount_label = QLabel("0.00 ج.م")
-        self.net_amount_label.setStyleSheet("font-weight: bold; color: #2c3e50;")
+        # Reference number
+        self.reference_input = QLineEdit()
         
-        # Cost price
-        self.cost_price_input = QDoubleSpinBox()
-        self.cost_price_input.setMaximum(999999)
-        self.cost_price_input.setDecimals(2)
-        self.cost_price_input.setSuffix(" ج.م")
+        # Status
+        self.status_combo = QComboBox()
+        self.status_combo.addItems(["completed", "pending", "failed"])
+        self.status_combo.setItemText(0, "مكتملة")
+        self.status_combo.setItemText(1, "قيد الانتظار")
+        self.status_combo.setItemText(2, "فاشلة")
         
-        # Profit (calculated)
-        self.profit_label = QLabel("0.00 ج.م")
-        self.profit_label.setStyleSheet("font-weight: bold;")
+        # Note
+        self.note_input = QTextEdit()
+        self.note_input.setMaximumHeight(100)
         
-        transaction_layout.addRow("رقم المعاملة:", self.transaction_id_input)
-        transaction_layout.addRow("المبلغ:", self.amount_input)
-        transaction_layout.addRow("العمولة:", self.commission_input)
-        transaction_layout.addRow("صافي المبلغ:", self.net_amount_label)
-        transaction_layout.addRow("سعر التكلفة:", self.cost_price_input)
-        transaction_layout.addRow("الربح:", self.profit_label)
+        # Add fields to form
+        form_layout.addRow("نوع المعاملة:", self.type_combo)
+        form_layout.addRow("المبلغ:", self.amount_input)
+        form_layout.addRow("من حساب:", self.from_account_input)
+        form_layout.addRow("إلى حساب:", self.to_account_input)
+        form_layout.addRow("رقم المرجع:", self.reference_input)
+        form_layout.addRow("الحالة:", self.status_combo)
+        form_layout.addRow("ملاحظات:", self.note_input)
         
-        transaction_group.setLayout(transaction_layout)
-        layout.addWidget(transaction_group)
+        # Buttons
+        buttons_layout = QHBoxLayout()
         
-        # Customer information section
-        customer_group = QGroupBox("معلومات العميل")
-        customer_layout = QFormLayout()
+        self.save_btn = QPushButton("حفظ")
+        self.save_btn.clicked.connect(self.save_transfer)
         
-        self.customer_name_input = QLineEdit()
-        self.customer_phone_input = QLineEdit()
-        self.recipient_name_input = QLineEdit()
-        self.recipient_phone_input = QLineEdit()
+        self.cancel_btn = QPushButton("إلغاء")
+        self.cancel_btn.clicked.connect(self.reject)
         
-        customer_layout.addRow("اسم العميل:", self.customer_name_input)
-        customer_layout.addRow("رقم هاتف العميل:", self.customer_phone_input)
-        customer_layout.addRow("اسم المستلم:", self.recipient_name_input)
-        customer_layout.addRow("رقم هاتف المستلم:", self.recipient_phone_input)
+        buttons_layout.addWidget(self.save_btn)
+        buttons_layout.addWidget(self.cancel_btn)
         
-        customer_group.setLayout(customer_layout)
-        layout.addWidget(customer_group)
+        layout.addLayout(form_layout)
+        layout.addLayout(buttons_layout)
         
-        # Reference information section
-        reference_group = QGroupBox("معلومات المرجع")
-        reference_layout = QFormLayout()
+        self.setLayout(layout)
+    
+    def load_transfer_data(self):
+        """Load existing transfer data for editing"""
+        if not self.transfer:
+            return
         
-        self.reference_no_input = QLineEdit()
-        self.operator_ref_input = QLineEdit()
-        self.verification_code_input = QLineEdit()
+        # Set transfer type
+        type_index = self.type_combo.findText(self.transfer.transfer_type)
+        if type_index >= 0:
+            self.type_combo.setCurrentIndex(type_index)
         
-        self.verified_checkbox = QCheckBox("تم التأكيد")
+        self.amount_input.setValue(self.transfer.amount)
+        self.from_account_input.setText(self.transfer.from_account or "")
+        self.to_account_input.setText(self.transfer.to_account or "")
+        self.reference_input.setText(self.transfer.reference_no or "")
         
-        reference_layout.addRow("رقم المرجع:", self.reference_no_input)
-        reference_layout.addRow("مرجع المشغل:", self.operator_ref_input)
-        reference_layout.addRow("كود التأكيد:", self.verification_code_input)
-        reference_layout.addRow("", self.verified_checkbox)
+        # Set status
+        status_map = {"completed": 0, "pending": 1, "failed": 2}
+        status_index = status_map.get(self.transfer.status, 0)
+        self.status_combo.setCurrentIndex(status_index)
         
-        reference_group.setLayout(reference_layout)
-        layout.addWidget(reference_group)
+        self.note_input.setPlainText(self.transfer.note or "")
+    
+    def save_transfer(self):
+        """Save transfer data"""
+        try:
+            # Validate required fields
+            if self.amount_input.value() <= 0:
+                QMessageBox.warning(self, "تحذير", "يرجى إدخال مبلغ صحيح")
+                return
+            
+            if not self.to_account_input.text().strip():
+                QMessageBox.warning(self, "تحذير", "يرجى إدخال حساب الوجهة")
+                return
+            
+            # Prepare transfer data
+            status_map = {0: "completed", 1: "pending", 2: "failed"}
+            transfer_data = {
+                'transfer_type': self.type_combo.currentText(),
+                'amount': self.amount_input.value(),
+                'from_account': self.from_account_input.text().strip() or None,
+                'to_account': self.to_account_input.text().strip(),
+                'reference_no': self.reference_input.text().strip() or None,
+                'status': status_map[self.status_combo.currentIndex()],
+                'note': self.note_input.toPlainText().strip() or None,
+                'user_id': self.parent().current_user.id
+            }
+            
+            # Save transfer
+            if self.is_edit_mode:
+                self.transfer_service.update_transfer(self.transfer.id, transfer_data)
+                QMessageBox.information(self, "نجح", "تم تحديث المعاملة بنجاح")
+            else:
+                transfer = self.transfer_service.create_transfer(transfer_data)
+                QMessageBox.information(self, "نجح", "تم إضافة المعاملة بنجاح")
+            
+            self.accept()
+            
+        except Exception as e:
+            QMessageBox.critical(self, "خطأ", f"خطأ في حفظ المعاملة: {str(e)}")
+
+class TransferViewDialog(QDialog):
+    """Dialog for viewing transfer details"""
+    
+    def __init__(self, parent, transfer):
+        super().__init__(parent)
+        self.transfer = transfer
+        self.setup_ui()
+    
+    def setup_ui(self):
+        """Setup dialog UI"""
+        self.setWindowTitle(f"تفاصيل المعاملة")
+        self.setModal(True)
+        self.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+        self.resize(400, 350)
         
-        # Notes section
-        notes_group = QGroupBox("ملاحظات")
-        notes_layout = QVBoxLayout()
-        
-        self.notes_input = QTextEdit()
-        self.notes_input.setMaximumHeight(80)
-        
-        notes_layout.addWidget(self.notes_input)
-        notes_group.setLayout(notes_layout)
-        layout.addWidget(notes_group)
-        
-        # Action buttons
-        actions_layout = QHBoxLayout()
-        self.save_transfer_btn = QPushButton("حفظ المعاملة")
-        self.save_and_print_btn = QPushButton("حفظ وطباعة إيصال")
-        self.clear_form_btn = QPushButton("مسح النموذج")
-        
-        actions_layout.addWidget(self.save_transfer_btn)
-        actions_layout.addWidget(self.save_and_print_btn)
-        actions_layout.addWidget(self.clear_form_btn)
-        actions_layout.addStretch()
-        
-        layout.addLayout(actions_layout)
-        layout.addStretch()
-        
-        new_transfer_widget.setLayout(layout)
-        self.tab_widget.addTab(new_transfer_widget, "معاملة جديدة")
-        
-    def setup_statistics_tab(self):
-        """Setup statistics tab"""
-        stats_widget = QWidget()
         layout = QVBoxLayout()
         
-        # Daily statistics
-        daily_group = QGroupBox("إحصائيات اليوم")
-        daily_layout = QFormLayout()
+        # Title
+        title_label = QLabel(f"معاملة {self.transfer.transfer_type}")
+        title_label.setFont(QFont("Noto Sans Arabic", 16, QFont.Weight.Bold))
+        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
-        self.today_count_label = QLabel("0")
-        self.today_amount_label = QLabel("0.00 ج.م")
-        self.today_profit_label = QLabel("0.00 ج.م")
-        self.today_commission_label = QLabel("0.00 ج.م")
-        
-        daily_layout.addRow("عدد المعاملات:", self.today_count_label)
-        daily_layout.addRow("إجمالي المبلغ:", self.today_amount_label)
-        daily_layout.addRow("إجمالي الربح:", self.today_profit_label)
-        daily_layout.addRow("إجمالي العمولات:", self.today_commission_label)
-        
-        daily_group.setLayout(daily_layout)
-        layout.addWidget(daily_group)
-        
-        # Service type breakdown
-        services_group = QGroupBox("تفصيل الخدمات")
-        services_layout = QVBoxLayout()
-        
-        self.services_table = QTableWidget()
-        self.services_table.setColumnCount(4)
-        self.services_table.setHorizontalHeaderLabels([
-            "نوع الخدمة", "عدد المعاملات", "إجمالي المبلغ", "إجمالي الربح"
-        ])
-        
-        services_layout.addWidget(self.services_table)
-        services_group.setLayout(services_layout)
-        layout.addWidget(services_group)
-        
-        layout.addStretch()
-        
-        stats_widget.setLayout(layout)
-        self.tab_widget.addTab(stats_widget, "الإحصائيات")
-        
-    def setup_connections(self):
-        """Setup signal connections"""
-        # Transfers list tab
-        self.search_input.textChanged.connect(self.filter_transfers)
-        self.type_filter.currentTextChanged.connect(self.filter_transfers)
-        self.status_filter.currentTextChanged.connect(self.filter_transfers)
-        
-        self.new_transfer_btn.clicked.connect(self.switch_to_new_transfer_tab)
-        self.edit_transfer_btn.clicked.connect(self.edit_selected_transfer)
-        self.verify_transfer_btn.clicked.connect(self.verify_selected_transfer)
-        self.print_receipt_btn.clicked.connect(self.print_transfer_receipt)
-        
-        self.transfers_table.doubleClicked.connect(self.edit_selected_transfer)
-        self.transfers_table.selectionModel().selectionChanged.connect(self.on_transfer_selection_changed)
-        
-        # New transfer tab
-        self.service_type_combo.currentTextChanged.connect(self.update_service_name)
-        self.amount_input.valueChanged.connect(self.calculate_amounts)
-        self.commission_input.valueChanged.connect(self.calculate_amounts)
-        self.cost_price_input.valueChanged.connect(self.calculate_amounts)
-        
-        self.save_transfer_btn.clicked.connect(self.save_transfer)
-        self.save_and_print_btn.clicked.connect(self.save_and_print_transfer)
-        self.clear_form_btn.clicked.connect(self.clear_transfer_form)
-        
-    def load_data(self):
-        """Load transfers data"""
-        self.load_transfers()
-        self.update_statistics()
-        self.generate_new_transaction_id()
-        
-    def load_transfers(self):
-        """Load transfers data"""
-        session = get_db_session()
-        try:
-            transfers = session.query(Transfer).order_by(Transfer.processed_at.desc()).limit(1000).all()
-            self.transfers_data = transfers
-            
-            self.update_transfers_table()
-            
-        finally:
-            session.close()
-            
-    def update_transfers_table(self):
-        """Update transfers table display"""
-        self.transfers_table.setRowCount(len(self.transfers_data))
-        
-        total_amount = 0
-        total_profit = 0
-        pending_count = 0
-        
-        for row, transfer in enumerate(self.transfers_data):
-            # Calculate totals
-            total_amount += transfer.amount
-            total_profit += transfer.profit
-            if transfer.status == "pending":
-                pending_count += 1
-            
-            # Transaction ID
-            self.transfers_table.setItem(row, 0, QTableWidgetItem(transfer.transaction_id))
-            
-            # Service type
-            self.transfers_table.setItem(row, 1, QTableWidgetItem(transfer.service_type_ar))
-            
-            # Amounts
-            self.transfers_table.setItem(row, 2, QTableWidgetItem(format_currency(transfer.amount)))
-            self.transfers_table.setItem(row, 3, QTableWidgetItem(format_currency(transfer.commission)))
-            self.transfers_table.setItem(row, 4, QTableWidgetItem(format_currency(transfer.net_amount)))
-            
-            # Customer info
-            self.transfers_table.setItem(row, 5, QTableWidgetItem(transfer.customer_name or ""))
-            self.transfers_table.setItem(row, 6, QTableWidgetItem(transfer.customer_phone))
-            
-            # Status with color coding
-            status_item = QTableWidgetItem(self.get_status_display(transfer.status))
-            status_item.setBackground(self.get_status_color(transfer.status))
-            self.transfers_table.setItem(row, 7, status_item)
-            
-            # Date
-            self.transfers_table.setItem(row, 8, QTableWidgetItem(transfer.processed_at.strftime("%Y-%m-%d %H:%M")))
-            
-            # References
-            self.transfers_table.setItem(row, 9, QTableWidgetItem(transfer.operator_ref or ""))
-            self.transfers_table.setItem(row, 10, QTableWidgetItem(transfer.reference_no or ""))
-            
-            # Profit with color coding
-            profit_item = QTableWidgetItem(format_currency(transfer.profit))
-            if transfer.profit > 0:
-                profit_item.setBackground(QColor("#e8f5e8"))  # Light green
-            elif transfer.profit < 0:
-                profit_item.setBackground(QColor("#ffebee"))  # Light red
-            self.transfers_table.setItem(row, 11, profit_item)
-            
-            # Store transfer ID
-            self.transfers_table.item(row, 0).setData(Qt.ItemDataRole.UserRole, transfer.id)
-        
-        # Update status labels
-        self.total_transfers_label.setText(f"إجمالي المعاملات: {len(self.transfers_data)}")
-        self.total_amount_label.setText(f"إجمالي المبلغ: {format_currency(total_amount)}")
-        self.total_profit_label.setText(f"إجمالي الربح: {format_currency(total_profit)}")
-        self.pending_count_label.setText(f"معاملات معلقة: {pending_count}")
-        
-    def update_statistics(self):
-        """Update statistics tab"""
-        session = get_db_session()
-        try:
-            # Today's statistics
-            today = datetime.now().date()
-            today_transfers = session.query(Transfer).filter(
-                Transfer.processed_at >= today
-            ).all()
-            
-            today_count = len(today_transfers)
-            today_amount = sum(t.amount for t in today_transfers)
-            today_profit = sum(t.profit for t in today_transfers)
-            today_commission = sum(t.commission for t in today_transfers)
-            
-            self.today_count_label.setText(str(today_count))
-            self.today_amount_label.setText(format_currency(today_amount))
-            self.today_profit_label.setText(format_currency(today_profit))
-            self.today_commission_label.setText(format_currency(today_commission))
-            
-            # Service type breakdown
-            service_stats = {}
-            for transfer in self.transfers_data:
-                service_type = transfer.service_type_ar
-                if service_type not in service_stats:
-                    service_stats[service_type] = {
-                        'count': 0,
-                        'amount': 0,
-                        'profit': 0
-                    }
-                service_stats[service_type]['count'] += 1
-                service_stats[service_type]['amount'] += transfer.amount
-                service_stats[service_type]['profit'] += transfer.profit
-            
-            self.services_table.setRowCount(len(service_stats))
-            for row, (service_type, stats) in enumerate(service_stats.items()):
-                self.services_table.setItem(row, 0, QTableWidgetItem(service_type))
-                self.services_table.setItem(row, 1, QTableWidgetItem(str(stats['count'])))
-                self.services_table.setItem(row, 2, QTableWidgetItem(format_currency(stats['amount'])))
-                self.services_table.setItem(row, 3, QTableWidgetItem(format_currency(stats['profit'])))
-                
-        finally:
-            session.close()
-            
-    def get_status_display(self, status: str) -> str:
-        """Get Arabic display text for status"""
-        status_map = {
-            "pending": "معلقة",
+        # Status mapping for display
+        status_text = {
             "completed": "مكتملة",
-            "failed": "فاشلة",
-            "cancelled": "ملغاة"
-        }
-        return status_map.get(status, status)
+            "pending": "قيد الانتظار", 
+            "failed": "فاشلة"
+        }.get(self.transfer.status, self.transfer.status)
         
-    def get_status_color(self, status: str) -> QColor:
-        """Get color for status"""
-        color_map = {
-            "pending": QColor("#fff3e0"),     # Light orange
-            "completed": QColor("#e8f5e8"),   # Light green
-            "failed": QColor("#ffebee"),      # Light red
-            "cancelled": QColor("#f5f5f5")    # Light gray
-        }
-        return color_map.get(status, QColor("#ffffff"))
+        # Details
+        details_text = f"""
+        نوع المعاملة: {self.transfer.transfer_type}
+        المبلغ: {self.transfer.amount:.2f} جنيه
         
-    def filter_transfers(self):
-        """Filter transfers based on search criteria"""
-        search_text = self.search_input.text().lower()
-        transfer_type = self.type_filter.currentData()
-        status = self.status_filter.currentData()
+        من حساب: {self.transfer.from_account or 'غير محدد'}
+        إلى حساب: {self.transfer.to_account}
         
-        for row in range(self.transfers_table.rowCount()):
-            show_row = True
-            
-            # Search filter
-            if search_text:
-                transaction_id = self.transfers_table.item(row, 0).text().lower()
-                customer_phone = self.transfers_table.item(row, 6).text().lower()
-                if search_text not in transaction_id and search_text not in customer_phone:
-                    show_row = False
-            
-            # Type filter
-            if transfer_type and show_row:
-                transfer_id = self.transfers_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
-                transfer = next((t for t in self.transfers_data if t.id == transfer_id), None)
-                if transfer and transfer.type != transfer_type:
-                    show_row = False
-            
-            # Status filter
-            if status and show_row:
-                transfer_id = self.transfers_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
-                transfer = next((t for t in self.transfers_data if t.id == transfer_id), None)
-                if transfer and transfer.status != status:
-                    show_row = False
-            
-            self.transfers_table.setRowHidden(row, not show_row)
-            
-    def on_transfer_selection_changed(self):
-        """Handle transfer selection change"""
-        has_selection = bool(self.transfers_table.selectedItems())
-        self.edit_transfer_btn.setEnabled(has_selection and self.current_user.has_permission("transfers", "update"))
-        self.verify_transfer_btn.setEnabled(has_selection and self.current_user.has_permission("transfers", "update"))
-        self.print_receipt_btn.setEnabled(has_selection)
+        رقم المرجع: {self.transfer.reference_no or 'غير محدد'}
+        الحالة: {status_text}
         
-    def generate_new_transaction_id(self):
-        """Generate new transaction ID"""
-        self.transaction_id_input.setText(generate_transaction_id())
+        التاريخ: {self.transfer.date.strftime('%Y-%m-%d %H:%M:%S') if self.transfer.date else 'غير محدد'}
+        المستخدم: {self.transfer.user.name if self.transfer.user else 'غير محدد'}
         
-    def update_service_name(self):
-        """Update service name based on selected type"""
-        service_type = self.service_type_combo.currentData()
-        if service_type and not self.service_name_input.text():
-            self.service_name_input.setText(self.service_type_combo.currentText())
-            
-    def calculate_amounts(self):
-        """Calculate net amount and profit"""
-        amount = self.amount_input.value()
-        commission = self.commission_input.value()
-        cost_price = self.cost_price_input.value()
+        ملاحظات: {self.transfer.note or 'لا توجد ملاحظات'}
+        """
         
-        net_amount = amount - commission
-        profit = net_amount - cost_price
+        details_label = QLabel(details_text)
+        details_label.setWordWrap(True)
+        details_label.setStyleSheet("QLabel { padding: 15px; background-color: #f5f5f5; border: 1px solid #ddd; border-radius: 5px; }")
         
-        self.net_amount_label.setText(format_currency(net_amount))
-        self.profit_label.setText(format_currency(profit))
+        # Close button
+        close_btn = QPushButton("إغلاق")
+        close_btn.clicked.connect(self.accept)
         
-        # Style profit label
-        if profit > 0:
-            self.profit_label.setStyleSheet("font-weight: bold; color: #28a745;")
-        elif profit < 0:
-            self.profit_label.setStyleSheet("font-weight: bold; color: #dc3545;")
-        else:
-            self.profit_label.setStyleSheet("font-weight: bold; color: #6c757d;")
-            
-    def switch_to_new_transfer_tab(self):
-        """Switch to new transfer tab"""
-        self.tab_widget.setCurrentIndex(1)
-        self.clear_transfer_form()
+        layout.addWidget(title_label)
+        layout.addWidget(details_label)
+        layout.addWidget(close_btn)
         
-    def clear_transfer_form(self):
-        """Clear new transfer form"""
-        self.service_type_combo.setCurrentIndex(0)
-        self.service_name_input.clear()
-        self.amount_input.setValue(0)
-        self.commission_input.setValue(0)
-        self.cost_price_input.setValue(0)
-        self.customer_name_input.clear()
-        self.customer_phone_input.clear()
-        self.recipient_name_input.clear()
-        self.recipient_phone_input.clear()
-        self.reference_no_input.clear()
-        self.operator_ref_input.clear()
-        self.verification_code_input.clear()
-        self.verified_checkbox.setChecked(False)
-        self.notes_input.clear()
-        self.generate_new_transaction_id()
+        self.setLayout(layout)
+
+# Create TransferService class
+class TransferService:
+    """Service for transfer management operations"""
+    
+    def __init__(self):
+        from utils.logger import get_logger
+        from config.database import SessionLocal
+        self.logger = get_logger(__name__)
+    
+    def get_transfers(self, start_date=None, end_date=None):
+        """Get transfers with optional date filter"""
+        from config.database import SessionLocal
+        from models.transfer import Transfer
+        from datetime import datetime, timedelta
         
-    def save_transfer(self):
-        """Save new transfer"""
-        if not self.validate_transfer_form():
-            return False
-        
+        db = SessionLocal()
         try:
-            transfer_data = self.get_transfer_form_data()
+            query = db.query(Transfer)
             
-            session = get_db_session()
-            try:
-                transfer = Transfer(**transfer_data)
-                transfer.calculate_profit()
-                
-                session.add(transfer)
-                session.commit()
-                
-                show_success(self, f"تم حفظ المعاملة رقم {self.transaction_id_input.text()} بنجاح")
-                self.load_transfers()
-                self.update_statistics()
-                self.clear_transfer_form()
-                self.tab_widget.setCurrentIndex(0)  # Switch to transfers list
-                return True
-                
-            except Exception as e:
-                session.rollback()
-                raise e
-            finally:
-                session.close()
-                
+            if start_date:
+                query = query.filter(Transfer.date >= datetime.combine(start_date, datetime.min.time()))
+            if end_date:
+                query = query.filter(Transfer.date <= datetime.combine(end_date, datetime.max.time()))
+            
+            return query.order_by(Transfer.date.desc()).all()
+            
         except Exception as e:
-            logging.error(f"Save transfer error: {e}")
-            show_error(self, f"خطأ في حفظ المعاملة:\n{str(e)}")
-            return False
+            self.logger.error(f"Error fetching transfers: {str(e)}")
+            raise e
+        finally:
+            db.close()
+    
+    def get_transfer_by_id(self, transfer_id):
+        """Get transfer by ID"""
+        from config.database import SessionLocal
+        from models.transfer import Transfer
+        
+        db = SessionLocal()
+        try:
+            return db.query(Transfer).filter(Transfer.id == transfer_id).first()
+        except Exception as e:
+            self.logger.error(f"Error fetching transfer {transfer_id}: {str(e)}")
+            raise e
+        finally:
+            db.close()
+    
+    def create_transfer(self, transfer_data):
+        """Create new transfer"""
+        from config.database import SessionLocal
+        from models.transfer import Transfer
+        
+        db = SessionLocal()
+        try:
+            transfer = Transfer(**transfer_data)
+            db.add(transfer)
+            db.commit()
             
-    def save_and_print_transfer(self):
-        """Save transfer and print receipt"""
-        if self.save_transfer():
-            # Print receipt for the saved transfer
-            pass
+            self.logger.info(f"Created transfer: {transfer.reference_no}")
+            return transfer
             
-    def validate_transfer_form(self):
-        """Validate transfer form data"""
-        if not self.service_name_input.text().strip():
-            show_error(self, "يرجى إدخال اسم الخدمة")
-            return False
+        except Exception as e:
+            db.rollback()
+            self.logger.error(f"Error creating transfer: {str(e)}")
+            raise e
+        finally:
+            db.close()
+    
+    def update_transfer(self, transfer_id, transfer_data):
+        """Update existing transfer"""
+        from config.database import SessionLocal
+        from models.transfer import Transfer
         
-        if self.amount_input.value() <= 0:
-            show_error(self, "يرجى إدخال مبلغ صحيح")
-            return False
+        db = SessionLocal()
+        try:
+            transfer = db.query(Transfer).filter(Transfer.id == transfer_id).first()
+            if not transfer:
+                raise ValueError("المعاملة غير موجودة")
+            
+            for key, value in transfer_data.items():
+                if hasattr(transfer, key):
+                    setattr(transfer, key, value)
+            
+            db.commit()
+            self.logger.info(f"Updated transfer: {transfer.reference_no}")
+            
+        except Exception as e:
+            db.rollback()
+            self.logger.error(f"Error updating transfer {transfer_id}: {str(e)}")
+            raise e
+        finally:
+            db.close()
+    
+    def delete_transfer(self, transfer_id):
+        """Delete transfer"""
+        from config.database import SessionLocal
+        from models.transfer import Transfer
         
-        if not self.customer_phone_input.text().strip():
-            show_error(self, "يرجى إدخال رقم هاتف العميل")
-            return False
-        
-        return True
-        
-    def get_transfer_form_data(self):
-        """Get transfer form data"""
-        return {
-            'transaction_id': self.transaction_id_input.text(),
-            'type': self.service_type_combo.currentData(),
-            'service_name': self.service_name_input.text().strip(),
-            'amount': self.amount_input.value(),
-            'commission': self.commission_input.value(),
-            'cost_price': self.cost_price_input.value(),
-            'customer_name': self.customer_name_input.text().strip() or None,
-            'customer_phone': self.customer_phone_input.text().strip(),
-            'recipient_name': self.recipient_name_input.text().strip() or None,
-            'recipient_phone': self.recipient_phone_input.text().strip() or None,
-            'reference_no': self.reference_no_input.text().strip() or None,
-            'operator_ref': self.operator_ref_input.text().strip() or None,
-            'verification_code': self.verification_code_input.text().strip() or None,
-            'verified': "yes" if self.verified_checkbox.isChecked() else "no",
-            'notes': self.notes_input.toPlainText().strip() or None,
-            'processed_by': self.current_user.id,
-            'status': "completed" if self.verified_checkbox.isChecked() else "pending"
-        }
-        
-    def edit_selected_transfer(self):
-        """Edit selected transfer"""
-        show_error(self, "ميزة تعديل المعاملات قيد التطوير")
-        
-    def verify_selected_transfer(self):
-        """Verify selected transfer"""
-        show_error(self, "ميزة تأكيد المعاملات قيد التطوير")
-        
-    def print_transfer_receipt(self):
-        """Print transfer receipt"""
-        show_error(self, "ميزة طباعة إيصال التحويل قيد التطوير")
+        db = SessionLocal()
+        try:
+            transfer = db.query(Transfer).filter(Transfer.id == transfer_id).first()
+            if not transfer:
+                raise ValueError("المعاملة غير موجودة")
+            
+            db.delete(transfer)
+            db.commit()
+            self.logger.info(f"Deleted transfer: {transfer.reference_no}")
+            
+        except Exception as e:
+            db.rollback()
+            self.logger.error(f"Error deleting transfer {transfer_id}: {str(e)}")
+            raise e
+        finally:
+            db.close()
